@@ -15,9 +15,12 @@ This module includes:
 - **Firmware**: Custom Studio RPC handler (`src/studio/watchdog_handler.c`)
 - **Protocol**: Protobuf definition (`proto/cormoran/watchdog/watchdog.proto`)
 - **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
-- **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
+- **Tests**: Firmware unit tests (`tests/studio/`, `tests/watchdog/`) and build tests (`tests/zmk-config/`)
 
-Detailed usage docs are TODO — the feature is still being implemented.
+The RPC surface and web UI currently cover **local incidents only** (the
+central, or a non-split board). Reading/deleting a split peripheral's
+incident log through the central is planned for a later phase (DESIGN.md
+Phase E) and not implemented yet.
 
 ## More Info
 
@@ -67,13 +70,14 @@ For more info on modules, you can read through through the [Zephyr modules page]
    CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
    CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
 
-   # Optionally enable custom Studio RPC (not implemented yet, see below)
+   # Enable custom Studio RPC + web UI (local incidents only for now -- see
+   # the note above about split peripherals).
    CONFIG_ZMK_STUDIO=y
    CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y
-   CONFIG_ZMK_CUSTOM_SETTINGS=y
-   CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
    CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
-   CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
+   # IncidentPage responses (up to 4 incidents per page) need more than the
+   # default 64-byte TX buffer.
+   CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
    ```
 
    **Important conflict note**: `CONFIG_ZMK_WATCHDOG_FATAL_DETECT` overrides
@@ -82,10 +86,20 @@ For more info on modules, you can read through through the [Zephyr modules page]
    definitions silently wins at link time (no compile error) -- only one
    fatal handler can be active.
 
-3. TODO: the Studio RPC surface and the web UI are not implemented yet --
-   this module currently provides the incident store, the retained-RAM
-   pending slot that crosses a reboot, and the three detectors (freeze,
-   fatal, boot-time reset-cause audit). For now see:
+3. Open the [web UI](https://cormoran.github.io/zmk-feature-watchdog/) (or
+   run it locally, see `web/README.md`) and connect over serial via ZMK
+   Studio's WebSerial transport. The page shows:
+   - a **status card**: capacity, stored count, dropped-since-boot, and a
+     "recording paused" banner once the store is full (delete incidents to
+     resume);
+   - an **incident table**: id, source (always "Central" in this phase),
+     type badge, boot ordinal + uptime, and a detail column decoded per
+     incident type (freeze queue name, fatal reason/PC/LR, reset-cause bits);
+   - per-row **delete** and **delete all** (with confirmation);
+   - new incidents appear live via a push notification, without needing to
+     refresh.
+
+   Implementation reference:
    - `include/cormoran/zmk/watchdog.h` — incident record type + store/pending/detector API
    - `src/watchdog_store.c` — settings-backed incident store
    - `src/watchdog_pending.c` — retained-RAM pending slot + boot conversion
@@ -93,9 +107,9 @@ For more info on modules, you can read through through the [Zephyr modules page]
    - `src/watchdog_fatal.c` — `k_sys_fatal_error_handler()` override (hard faults, oops/panic)
    - `src/watchdog_reset_cause.c` — boot-time `hwinfo` reset-cause audit
    - `src/watchdog_inject.c` — dangerous test/fault injection helpers (`CONFIG_ZMK_WATCHDOG_TEST_INJECTION`, default n)
-   - `proto/cormoran/watchdog/watchdog.proto` — message types (placeholder)
-   - `src/studio/watchdog_handler.c` — firmware RPC handler (placeholder)
-   - `web/src/App.tsx` — web UI (placeholder)
+   - `proto/cormoran/watchdog/watchdog.proto` — message types (`Request`/`Response`/`Notification`)
+   - `src/studio/watchdog_handler.c` — firmware RPC handler (GetStatus/ListIncidents/DeleteIncidents)
+   - `web/src/App.tsx`, `web/src/IncidentsSection.tsx` — web UI
 
 ### Flash-wear protection
 

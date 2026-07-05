@@ -86,7 +86,7 @@ static K_WORK_DELAYABLE_DEFINE(reset_cause_audit_work, reset_cause_audit_work_ha
 
 static int watchdog_reset_cause_boot_hook(void) {
     k_work_schedule_for_queue(zmk_workqueue_lowprio_work_q(), &reset_cause_audit_work,
-                               K_MSEC(WATCHDOG_RESET_CAUSE_DELAY_MS));
+                              K_MSEC(WATCHDOG_RESET_CAUSE_DELAY_MS));
     return 0;
 }
 

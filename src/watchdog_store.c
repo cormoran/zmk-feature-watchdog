@@ -48,6 +48,7 @@ static K_MUTEX_DEFINE(watchdog_store_lock);
 static struct watchdog_store_slot slots[CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS];
 static struct watchdog_store_meta meta = {.next_boot_ordinal = 1, .next_id = 1};
 static uint32_t dropped_since_boot;
+static zmk_watchdog_store_appended_cb_t appended_cb;
 
 static int slot_settings_name(uint16_t slot, char *name, size_t name_size) {
     int ret = snprintf(name, name_size, SETTINGS_SUBTREE "/i/%u", (unsigned int)slot);
@@ -164,6 +165,11 @@ int zmk_watchdog_store_append(struct zmk_watchdog_incident_record *rec) {
 
     LOG_INF("Watchdog incident stored: id=%u slot=%d type=%u ordinal=%u", blob.id, slot, rec->type,
             rec->boot_ordinal);
+
+    if (appended_cb) {
+        appended_cb(blob.id, rec);
+    }
+
     return 0;
 }
 
@@ -261,6 +267,24 @@ int zmk_watchdog_store_get_by_id(uint16_t id, struct zmk_watchdog_incident_recor
     return 0;
 }
 
+int zmk_watchdog_store_get_with_id(uint16_t index, struct zmk_watchdog_incident_record *out,
+                                   uint16_t *id_out) {
+    if (!out || !id_out) {
+        return -EINVAL;
+    }
+
+    k_mutex_lock(&watchdog_store_lock, K_FOREVER);
+    int slot = find_slot_by_enum_index_locked(index);
+    if (slot < 0) {
+        k_mutex_unlock(&watchdog_store_lock);
+        return -ENOENT;
+    }
+    *out = slots[slot].blob.rec;
+    *id_out = slots[slot].blob.id;
+    k_mutex_unlock(&watchdog_store_lock);
+    return 0;
+}
+
 uint16_t zmk_watchdog_store_capacity(void) { return CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS; }
 
 uint16_t zmk_watchdog_store_count(void) {
@@ -274,6 +298,10 @@ uint32_t zmk_watchdog_store_dropped_since_boot(void) { return dropped_since_boot
 
 bool zmk_watchdog_store_recording_stopped(void) {
     return zmk_watchdog_store_count() >= CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS;
+}
+
+void zmk_watchdog_store_set_appended_callback(zmk_watchdog_store_appended_cb_t cb) {
+    appended_cb = cb;
 }
 
 /* --------------------------------------------------------------------

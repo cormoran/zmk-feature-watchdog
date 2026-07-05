@@ -9,4 +9,9 @@ plugins:
       - outputClientImpl=false
       - useExactTypes=false
       - esModuleInterop=true
+      # This module's proto (IncidentType) has an enum. ts-proto's default
+      # `export enum` output fails tsconfig.app.json's erasableSyntaxOnly
+      # (TS1294): enum declarations are not erasable syntax. enumsAsLiterals
+      # emits an `as const` object + type alias instead, which is.
+      - enumsAsLiterals=true
     out: src/proto

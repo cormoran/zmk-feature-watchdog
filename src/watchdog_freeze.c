@@ -67,8 +67,7 @@ static void watchdog_freeze_channel_fired(int channel_id, void *user_data) {
     rec.type = ZMK_WATCHDOG_INCIDENT_FREEZE;
     rec.uptime_s = (uint32_t)(k_uptime_get() / 1000);
     rec.detail.freeze.channel_id = (uint8_t)channel_id;
-    strncpy(rec.detail.freeze.queue_name, mon->name,
-            sizeof(rec.detail.freeze.queue_name) - 1);
+    strncpy(rec.detail.freeze.queue_name, mon->name, sizeof(rec.detail.freeze.queue_name) - 1);
 
     zmk_watchdog_pending_set(&rec);
     zmk_watchdog_reboot();
@@ -82,7 +81,7 @@ static void watchdog_freeze_feed_work_handler(struct k_work *work) {
     task_wdt_feed(mon->channel_id);
 
     k_work_reschedule_for_queue(mon->get_queue(), &mon->feed_work,
-                                 K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS / 4));
+                                K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS / 4));
 }
 
 #if IS_ENABLED(CONFIG_ZMK_WATCHDOG_HW_FALLBACK)
@@ -119,8 +118,8 @@ static int watchdog_freeze_init(void) {
     for (size_t i = 0; i < ARRAY_SIZE(watchdog_freeze_monitors); i++) {
         struct watchdog_freeze_monitor *mon = &watchdog_freeze_monitors[i];
 
-        int channel_id = task_wdt_add(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS,
-                                       watchdog_freeze_channel_fired, mon);
+        int channel_id =
+            task_wdt_add(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS, watchdog_freeze_channel_fired, mon);
         if (channel_id < 0) {
             LOG_ERR("task_wdt_add failed for queue '%s': %d", mon->name, channel_id);
             return channel_id;
@@ -129,7 +128,7 @@ static int watchdog_freeze_init(void) {
 
         k_work_init_delayable(&mon->feed_work, watchdog_freeze_feed_work_handler);
         k_work_schedule_for_queue(mon->get_queue(), &mon->feed_work,
-                                   K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS / 4));
+                                  K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS / 4));
 
         LOG_INF("Watchdog freeze monitor armed: queue='%s' channel=%d timeout=%dms", mon->name,
                 channel_id, CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS);

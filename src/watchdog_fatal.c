@@ -34,7 +34,7 @@
  */
 
 void watchdog_fatal_build_record(struct zmk_watchdog_incident_record *rec, unsigned int reason,
-                                  const struct arch_esf *esf) {
+                                 const struct arch_esf *esf) {
     memset(rec, 0, sizeof(*rec));
     rec->type = ZMK_WATCHDOG_INCIDENT_FATAL;
     rec->uptime_s = (uint32_t)(k_uptime_get() / 1000);
@@ -59,8 +59,7 @@ void watchdog_fatal_build_record(struct zmk_watchdog_incident_record *rec, unsig
     if (thread_name == NULL || thread_name[0] == '\0') {
         thread_name = "?";
     }
-    strncpy(rec->detail.fatal.thread_name, thread_name,
-            sizeof(rec->detail.fatal.thread_name) - 1);
+    strncpy(rec->detail.fatal.thread_name, thread_name, sizeof(rec->detail.fatal.thread_name) - 1);
 }
 
 void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf) {

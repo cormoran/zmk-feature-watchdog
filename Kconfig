@@ -97,4 +97,15 @@ config ZMK_WATCHDOG_TEST
       Adds test-only init logic exercising the store and pending-slot boot
       conversion. Not for production builds.
 
+config ZMK_WATCHDOG_STUDIO_RPC_TEST
+    bool "Enable watchdog Studio RPC self-test (native_sim only)"
+    depends on ZMK_WATCHDOG_STUDIO_RPC
+    help
+      Adds test-only init logic exercising src/studio/watchdog_handler.c's
+      GetStatus/ListIncidents/DeleteIncidents handlers directly (no
+      transport). Built separately from CONFIG_ZMK_WATCHDOG_TEST because it
+      needs CONFIG_ZMK_STUDIO, which in turn needs a physical-layout
+      devicetree (see tests/studio/ vs tests/watchdog/). Not for production
+      builds.
+
 endif

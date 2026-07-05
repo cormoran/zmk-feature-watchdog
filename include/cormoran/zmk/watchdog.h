@@ -130,6 +130,15 @@ int zmk_watchdog_store_get(uint16_t index, struct zmk_watchdog_incident_record *
  * -ENOENT if no incident with that id is currently stored. */
 int zmk_watchdog_store_get_by_id(uint16_t id, struct zmk_watchdog_incident_record *out);
 
+/* Like zmk_watchdog_store_get(), but also hands back the RPC-visible id the
+ * incident was assigned when appended (the same id zmk_watchdog_store_get_by_id()
+ * and zmk_watchdog_store_delete() take). Added for the Studio RPC listing
+ * handler (src/studio/watchdog_handler.c), which needs the id to let the web
+ * UI delete individual incidents by id. Returns 0 and fills out/id_out on
+ * success, -ENOENT if index is out of range. */
+int zmk_watchdog_store_get_with_id(uint16_t index, struct zmk_watchdog_incident_record *out,
+                                   uint16_t *id_out);
+
 /* Maximum number of incidents the store can hold (CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS). */
 uint16_t zmk_watchdog_store_capacity(void);
 
@@ -262,6 +271,27 @@ void zmk_watchdog_inject_fatal(void);
  * re-firing (and calling zmk_watchdog_reboot() again) for the rest of the
  * test process's life. Not for production use. */
 void zmk_watchdog_freeze_disarm_sysworkq_channel_for_test(void);
+
+/*
+ * ---------------------------------------------------------------------
+ * Store append hook (src/watchdog_store.c): lets an optional listener (the
+ * Studio RPC handler, when CONFIG_ZMK_WATCHDOG_STUDIO_RPC is enabled) learn
+ * about newly-persisted incidents without the store itself depending on
+ * Studio RPC -- keeps the store usable on peripherals / native_sim builds
+ * with no RPC subsystem at all (DESIGN.md SS6-SS7: the store is shared by
+ * both split roles, only the central has Studio RPC).
+ * ---------------------------------------------------------------------
+ */
+
+typedef void (*zmk_watchdog_store_appended_cb_t)(uint16_t id,
+                                                 const struct zmk_watchdog_incident_record *rec);
+
+/* Registers a callback invoked at the end of a successful
+ * zmk_watchdog_store_append() (not called when the incident was dropped due
+ * to the cap). Only one listener is supported; pass NULL to unregister. Not
+ * called from ISR context -- append() itself never is (see DESIGN.md SS5:
+ * detectors go through the retained-RAM pending slot instead). */
+void zmk_watchdog_store_set_appended_callback(zmk_watchdog_store_appended_cb_t cb);
 
 #ifdef __cplusplus
 }

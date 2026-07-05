@@ -1,7 +1,9 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { setupZMKMocks } from "@cormoran/zmk-studio-react-hook/testing";
+import { call_rpc } from "@zmkfirmware/zmk-studio-ts-client";
 import App from "../src/App";
+import { Response } from "../src/proto/cormoran/watchdog/watchdog";
 
 // Mock the ZMK client
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
@@ -19,7 +21,7 @@ describe("App Component", () => {
       render(<App />);
 
       expect(screen.getByText(/ZMK Watchdog/i)).toBeInTheDocument();
-      expect(screen.getByText(/Custom Studio RPC Demo/i)).toBeInTheDocument();
+      expect(screen.getByText(/Firmware Incident Log/i)).toBeInTheDocument();
     });
 
     it("should render connection button when disconnected", () => {
@@ -39,7 +41,9 @@ describe("App Component", () => {
     let mocks: ReturnType<typeof setupZMKMocks>;
 
     beforeEach(() => {
+      jest.clearAllMocks();
       mocks = setupZMKMocks();
+      (call_rpc as jest.Mock).mockResolvedValue(emptyStatusResponse());
     });
 
     it("should connect to device when connect button is clicked", async () => {
@@ -67,7 +71,28 @@ describe("App Component", () => {
       });
 
       expect(screen.getByText(/Disconnect/i)).toBeInTheDocument();
-      expect(screen.getByText(/RPC Test/i)).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Status" })
+      ).toBeInTheDocument();
     });
   });
 });
+
+function emptyStatusResponse() {
+  return {
+    custom: {
+      call: {
+        payload: Response.encode(
+          Response.create({
+            status: {
+              capacity: 16,
+              stored: 0,
+              droppedSinceBoot: 0,
+              recordingStopped: false,
+            },
+          })
+        ).finish(),
+      },
+    },
+  };
+}

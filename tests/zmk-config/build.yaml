@@ -6,7 +6,10 @@ include:
   - artifact: module_watchdog_board_with_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
+    # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512: watchdog's IncidentPage response
+    # (up to 4 incidents) needs more than the default 64-byte TX buffer --
+    # see the BUILD_ASSERT + size arithmetic in src/studio/watchdog_handler.c.
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y -DCONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
     snippet: studio-rpc-usb-uart
 
   - artifact: module_watchdog_board_without_rpc
@@ -17,5 +20,7 @@ include:
   - artifact: custom_settings_board
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
+    # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512: see the module_watchdog_board_with_rpc
+    # comment above.
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y -DCONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
     snippet: studio-rpc-usb-uart

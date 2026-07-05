@@ -1,5 +1,17 @@
 # Nanopb options file for watchdog.proto
-# This defines max sizes for string fields
+# Every string/bytes field needs an explicit max_size (nanopb pitfall); every
+# repeated field needs an explicit max_count (page size / delete batch size).
 
-cormoran.watchdog.SampleResponse.value    max_size:64
-cormoran.watchdog.ErrorResponse.message   max_size:64
+cormoran.watchdog.ErrorResponse.message           max_size:64
+
+cormoran.watchdog.FreezeDetail.queue_name         max_size:16
+cormoran.watchdog.FatalDetail.thread_name         max_size:16
+
+# Pagination: at most 4 incidents per ListIncidents response (see the
+# BUILD_ASSERT in src/studio/watchdog_handler.c for the size arithmetic).
+cormoran.watchdog.IncidentPageResponse.incidents  max_count:4
+
+# Delete-by-id batch size: generous enough to delete a handful of incidents
+# in one call without needing repeated round-trips; still small relative to
+# CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS default (16).
+cormoran.watchdog.DeleteIncidentsRequest.ids       max_count:16

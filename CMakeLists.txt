@@ -24,6 +24,10 @@ if(CONFIG_ZMK_WATCHDOG)
         file(GLOB_RECURSE C_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/studio/*.c)
         target_sources(app PRIVATE ${C_FILES})
 
+        if(CONFIG_ZMK_WATCHDOG_STUDIO_RPC_TEST)
+            target_sources(app PRIVATE src/test/watchdog_rpc_test.c)
+        endif()
+
         list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
         include(nanopb)
         set(NANOPB_GENERATE_CPP_APPEND_PATH TRUE)
