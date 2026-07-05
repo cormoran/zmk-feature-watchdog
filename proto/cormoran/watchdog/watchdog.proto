@@ -111,9 +111,11 @@ message StatusResponse {
     bool recording_stopped = 4;
 }
 
-// At most 4 incidents per page -- see the BUILD_ASSERT in
-// src/studio/watchdog_handler.c for the size arithmetic against
-// CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE.
+// At most WATCHDOG_RPC_PAGE_SIZE incidents per page (see
+// src/studio/watchdog_request_exec.c and watchdog.options' max_count on
+// `incidents` below) -- purely a UX choice now that the split relay path
+// streams one incident per relay event (DESIGN.md SS7.1) instead of
+// embedding a whole page in one relay event.
 message IncidentPageResponse {
     repeated Incident incidents = 1;
     uint32 total = 2;
@@ -181,7 +183,56 @@ message RelayRequest {
     Request request = 2;
 }
 
+// One incident of a ListIncidents answer, streamed as its own relay event
+// (DESIGN.md SS7.1) so a RelayResponse never has to embed a whole
+// multi-incident IncidentPageResponse (which would force
+// CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN above its 128-byte default). The
+// peripheral responder raises one of these per incident in the local page,
+// followed by one final `done=true` chunk (no incident) carrying `total`/
+// `start_index` for the whole page. `incident` is unset (has_incident=false)
+// on that final chunk.
+message RelayIncidentChunk {
+    bool done = 1;
+    uint32 total = 2;
+    uint32 start_index = 3;
+    Incident incident = 4;
+}
+
+// The non-paginated Response variants a peripheral can produce for a
+// relayed GetStatus/DeleteIncidents/InjectTest request (or a decode/
+// unsupported-request error) -- i.e. every `Response.response_type` oneof
+// member except `incident_page` (ListIncidents streams via
+// RelayIncidentChunk instead, see below) and `deferred` (only ever
+// synthesized by the central itself, never received from a peripheral).
+// Deliberately a *separate, small* message rather than reusing `Response`
+// directly: nanopb's static `_size` bound for a oneof-typed field is the
+// worst case across every branch of the referenced message's own oneof, so
+// embedding the full `Response` type here (whose `incident_page` branch can
+// hold WATCHDOG_RPC_PAGE_SIZE incidents) would make a single RelayResponse's
+// static encoded-size bound exceed the split relay transport's 255-byte
+// hard ceiling even though an incident_page is never actually placed here
+// at runtime -- exactly the blowup this whole redesign (DESIGN.md SS7.1)
+// exists to avoid. Field numbers/semantics mirror Response's, so converting
+// between the two is a straight copy.
+message RelayNonListResponse {
+    oneof relay_non_list_response_type {
+        ErrorResponse error = 1;
+        StatusResponse status = 2;
+        DeleteResultResponse delete_result = 4;
+        InjectAckResponse inject_ack = 6;
+    }
+}
+
+// RelayResponse is a oneof: `response` is used for GetStatus/
+// DeleteIncidents/InjectTest/Error (already small, single-shot answers --
+// same semantics as Response, see RelayNonListResponse's doc comment for
+// why it is a distinct message), while `incident_chunk` is used only for a
+// ListIncidents answer, streamed one incident per relay event (see
+// RelayIncidentChunk).
 message RelayResponse {
     uint32 request_id = 1;
-    Response response = 2;
+    oneof relay_response_type {
+        RelayNonListResponse response = 2;
+        RelayIncidentChunk incident_chunk = 3;
+    }
 }

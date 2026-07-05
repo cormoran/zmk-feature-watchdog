@@ -83,6 +83,9 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y",
                         "CONFIG_TASK_WDT=y",
                         "CONFIG_TASK_WDT_HW_FALLBACK=y",
+                        # DESIGN.md SS7.2: the Studio RPC TX path never needs
+                        # to be raised above its framework default.
+                        "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=64",
                     ],
                     device=[
                         # xiao_ble's nRF52840 wdt0 node, used as the task_wdt
@@ -160,6 +163,9 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_WATCHDOG_PROTOBUF=y",
                         NotFound("CONFIG_ZMK_STUDIO=y"),
                         NotFound("CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y"),
+                        # DESIGN.md SS7.1: the split relay event payload never
+                        # needs to be raised above its framework default.
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=128",
                     ],
                     device=[],
                 ),
@@ -175,7 +181,12 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=y",
                         "CONFIG_ZMK_STUDIO=y",
                         "CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y",
-                        "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512",
+                        # DESIGN.md SS7.1/SS7.2: neither buffer needs to be
+                        # raised above its framework default any more, so
+                        # this artifact's snippets no longer set them --
+                        # verify they stay at the framework defaults.
+                        "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=64",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=128",
                     ],
                     device=[],
                 ),

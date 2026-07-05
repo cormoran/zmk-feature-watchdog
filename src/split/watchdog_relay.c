@@ -8,20 +8,35 @@
  * @file watchdog_relay.c
  *
  * @brief Split relay bridge for the `cormoran.watchdog` Studio RPC subsystem
- * (CONFIG_ZMK_WATCHDOG_SPLIT_RELAY, see DESIGN.md SS7) -- enabled on BOTH
- * halves of a split keyboard:
+ * (CONFIG_ZMK_WATCHDOG_SPLIT_RELAY, see DESIGN.md SS7/SS7.1) -- enabled on
+ * BOTH halves of a split keyboard:
  *
  *  - Peripheral role: receives a relayed `RelayRequest` (ZMK split relay
  *    event, identifier "wdq"), executes it against this half's own local
- *    watchdog store via watchdog_request_exec_handle(), and relays a
- *    `RelayResponse` back (identifier "wdp").
+ *    watchdog store via watchdog_request_exec_handle() exactly as before,
+ *    then relays the result back (identifier "wdp") as one or more
+ *    `RelayResponse` events (see DESIGN.md SS7.1):
+ *      - ListIncidents: one `RelayResponse{incident_chunk:{done:false,...}}`
+ *        event per incident in the local page, followed by one final
+ *        `{done:true, total, start_index}` event with no incident. Keeps
+ *        every relay event close to "one Incident + envelope" regardless of
+ *        page size, instead of embedding a whole multi-incident page in one
+ *        relay event (which would force
+ *        CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN above its 128-byte default).
+ *      - Every other request kind: a single `RelayResponse{response:...}`
+ *        event, same as before this redesign.
  *  - Central role: watchdog_relay_dispatch_request() (called from
  *    src/studio/watchdog_handler.c for any GetStatus/ListIncidents/
  *    DeleteIncidents request whose `source` is nonzero) relays the request
- *    out and immediately returns a DeferredResponse; when the matching
- *    `RelayResponse` relays back in, it is re-raised as a
- *    `PeripheralResponse` Studio notification (the same "custom
- *    notification" mechanism used by IncidentRecorded).
+ *    out and immediately returns a DeferredResponse. When a matching
+ *    `RelayResponse` relays back in:
+ *      - a `response` event is re-raised immediately as a
+ *        `PeripheralResponse` Studio notification, same as before;
+ *      - an `incident_chunk` event is accumulated into a small static
+ *        per-request-id buffer; once a `done:true` chunk arrives, the
+ *        accumulated incidents are wrapped into the same
+ *        `PeripheralResponse{response:{incident_page:{...}}}` shape the web
+ *        UI already expects and raised once as a Studio notification.
  *
  * Pattern (event struct shape, relay macros, subsystem-index lookup,
  * static-buffer notification encoding, DeferredResponse/PeripheralResponse
@@ -112,17 +127,22 @@ BUILD_ASSERT(sizeof(struct zmk_watchdog_relay_response) <= CONFIG_ZMK_SPLIT_RELA
  * struct relay_event_header (zmk/split/transport/types.h) encodes a relayed
  * event's data size in a single `uint8_t event_data_size` wire field, so no
  * relayed event can ever exceed 255 bytes regardless of how high
- * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is set. If either of watchdog's own
- * relay structs exceeds that, raising the Kconfig value would not help --
- * watchdog.options' IncidentPageResponse.incidents max_count must come down
- * instead. */
+ * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN is set. Both watchdog relay structs
+ * comfortably fit under this with the framework's 128-byte
+ * CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN default: since DESIGN.md SS7.1,
+ * ListIncidents answers stream one incident per relay event
+ * (RelayResponse.incident_chunk) instead of embedding a whole page, so
+ * neither relay struct's size depends on watchdog.options'
+ * IncidentPageResponse.incidents max_count (the local ListIncidents page
+ * size, src/studio/watchdog_request_exec.c's WATCHDOG_RPC_PAGE_SIZE, can be
+ * tuned purely for UX without affecting either BUILD_ASSERT below). */
 BUILD_ASSERT(sizeof(struct zmk_watchdog_relay_request) <= 255,
              "the watchdog relay request payload exceeds the split relay transport's 255-byte "
              "hard ceiling (relay_event_header.event_data_size is a uint8_t)");
 BUILD_ASSERT(sizeof(struct zmk_watchdog_relay_response) <= 255,
-             "the watchdog relay response payload exceeds the split relay transport's 255-byte "
-             "hard ceiling (relay_event_header.event_data_size is a uint8_t) -- reduce "
-             "watchdog.options' IncidentPageResponse.incidents max_count");
+             "the watchdog relay response payload (one incident + envelope) exceeds the split "
+             "relay transport's 255-byte hard ceiling (relay_event_header.event_data_size is a "
+             "uint8_t)");
 
 ZMK_EVENT_DECLARE(zmk_watchdog_relay_request);
 ZMK_EVENT_DECLARE(zmk_watchdog_relay_response);
@@ -134,17 +154,20 @@ ZMK_RELAY_EVENT_HANDLE(zmk_watchdog_relay_response, wdp, source);
 ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(zmk_watchdog_relay_request, wdq, source);
 ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(zmk_watchdog_relay_response, wdp, source);
 
-/* --- Peripheral role: execute a relayed request, relay the response back --- */
+/* --- Peripheral role: execute a relayed request, relay the response(s) back --- */
 
 /* Decodes `payload`, executes it via watchdog_request_exec_handle() against
- * this half's local store, and fills `out_resp` (always -- an
- * unsupported/undecodable request produces an ErrorResponse, not a
- * function failure, matching this module's existing "never crash on a bad
- * request" style). Exposed as its own step (rather than inlined into the
- * event listener below) so the split-relay self-test can exercise it
- * directly without needing a real relay event. */
+ * this half's local store -- exactly as before this file's DESIGN.md SS7.1
+ * rework -- and fills `out_request_id`/`out_resp` (always: an
+ * unsupported/undecodable request produces an ErrorResponse, not a function
+ * failure, matching this module's existing "never crash on a bad request"
+ * style). Exposed as its own step (rather than inlined below) so the
+ * split-relay self-test can exercise it directly without needing a real
+ * relay event. Returns -EINVAL if `payload` itself failed to decode as a
+ * RelayRequest (nothing to respond with at all in that case). */
 static int watchdog_relay_exec_request(const uint8_t *payload, size_t size,
-                                       cormoran_watchdog_RelayResponse *out_resp) {
+                                       uint32_t *out_request_id,
+                                       cormoran_watchdog_Response *out_resp) {
     cormoran_watchdog_RelayRequest relay_req = cormoran_watchdog_RelayRequest_init_zero;
     pb_istream_t istream = pb_istream_from_buffer(payload, size);
     if (!pb_decode(&istream, cormoran_watchdog_RelayRequest_fields, &relay_req)) {
@@ -152,17 +175,16 @@ static int watchdog_relay_exec_request(const uint8_t *payload, size_t size,
         return -EINVAL;
     }
 
-    *out_resp = (cormoran_watchdog_RelayResponse)cormoran_watchdog_RelayResponse_init_zero;
-    out_resp->request_id = relay_req.request_id;
-    out_resp->has_response = true;
+    *out_request_id = relay_req.request_id;
+    *out_resp = (cormoran_watchdog_Response)cormoran_watchdog_Response_init_zero;
 
     if (!relay_req.has_request) {
         cormoran_watchdog_ErrorResponse err = cormoran_watchdog_ErrorResponse_init_zero;
         snprintf(err.message, sizeof(err.message), "missing relayed watchdog request");
-        out_resp->response.which_response_type = cormoran_watchdog_Response_error_tag;
-        out_resp->response.response_type.error = err;
+        out_resp->which_response_type = cormoran_watchdog_Response_error_tag;
+        out_resp->response_type.error = err;
     } else {
-        watchdog_request_exec_handle(&relay_req.request, &out_resp->response);
+        watchdog_request_exec_handle(&relay_req.request, out_resp);
     }
 
     return 0;
@@ -170,26 +192,142 @@ static int watchdog_relay_exec_request(const uint8_t *payload, size_t size,
 
 #if !IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 
+/* Converts a non-paginated Response variant (error/status/delete_result/
+ * inject_ack -- never incident_page, see RelayNonListResponse's doc comment
+ * in watchdog.proto) into the matching RelayNonListResponse variant. Field
+ * numbers/semantics are 1:1, so this is a straight copy per variant. */
+static void response_to_relay_non_list_response(const cormoran_watchdog_Response *resp,
+                                                cormoran_watchdog_RelayNonListResponse *out) {
+    *out = (cormoran_watchdog_RelayNonListResponse)cormoran_watchdog_RelayNonListResponse_init_zero;
+
+    switch (resp->which_response_type) {
+    case cormoran_watchdog_Response_status_tag:
+        out->which_relay_non_list_response_type = cormoran_watchdog_RelayNonListResponse_status_tag;
+        out->relay_non_list_response_type.status = resp->response_type.status;
+        break;
+    case cormoran_watchdog_Response_delete_result_tag:
+        out->which_relay_non_list_response_type =
+            cormoran_watchdog_RelayNonListResponse_delete_result_tag;
+        out->relay_non_list_response_type.delete_result = resp->response_type.delete_result;
+        break;
+    case cormoran_watchdog_Response_inject_ack_tag:
+        out->which_relay_non_list_response_type =
+            cormoran_watchdog_RelayNonListResponse_inject_ack_tag;
+        out->relay_non_list_response_type.inject_ack = resp->response_type.inject_ack;
+        break;
+    case cormoran_watchdog_Response_incident_page_tag:
+        /* Never reached from on_watchdog_relay_request() below (ListIncidents
+         * is routed to the incident_chunk streaming path instead), but handle
+         * it defensively rather than silently drop it if some future caller
+         * misroutes one here. */
+        LOG_WRN("Unexpected incident_page routed through the non-list relay response path");
+        __fallthrough;
+    case cormoran_watchdog_Response_error_tag:
+    default:
+        out->which_relay_non_list_response_type = cormoran_watchdog_RelayNonListResponse_error_tag;
+        if (resp->which_response_type == cormoran_watchdog_Response_error_tag) {
+            out->relay_non_list_response_type.error = resp->response_type.error;
+        } else {
+            snprintf(out->relay_non_list_response_type.error.message,
+                     sizeof(out->relay_non_list_response_type.error.message),
+                     "unsupported response kind for split relay: %d", resp->which_response_type);
+        }
+        break;
+    }
+}
+
+/* Builds the `chunk_index`'th RelayResponse.incident_chunk message for
+ * `page` (a ListIncidents answer already built by
+ * watchdog_request_exec_handle() against the local store, DESIGN.md SS7.1):
+ * indices `[0, page->incidents_count)` are done=false chunks carrying one
+ * incident each, and index `page->incidents_count` is the final done=true
+ * chunk with no incident. Factored out as its own step (rather than inlined
+ * into stream_incident_page() below) so the split-relay self-test can
+ * assert the exact sequence of messages a real relay would send without
+ * needing the real transport (raise_zmk_watchdog_relay_response() needs
+ * zmk_split_peripheral_report_event(), a no-op without one, see this file's
+ * top doc comment). Returns the total number of chunks for this page
+ * (page->incidents_count + 1); `chunk_index` must be less than that. */
+static uint32_t build_incident_chunk_response(uint32_t request_id,
+                                              const cormoran_watchdog_IncidentPageResponse *page,
+                                              uint32_t chunk_index,
+                                              cormoran_watchdog_RelayResponse *out) {
+    *out = (cormoran_watchdog_RelayResponse)cormoran_watchdog_RelayResponse_init_zero;
+    out->request_id = request_id;
+    out->which_relay_response_type = cormoran_watchdog_RelayResponse_incident_chunk_tag;
+    cormoran_watchdog_RelayIncidentChunk *chunk = &out->relay_response_type.incident_chunk;
+    chunk->total = page->total;
+    chunk->start_index = page->start_index;
+
+    if (chunk_index < page->incidents_count) {
+        chunk->done = false;
+        chunk->has_incident = true;
+        chunk->incident = page->incidents[chunk_index];
+    } else {
+        chunk->done = true;
+        chunk->has_incident = false;
+    }
+
+    return page->incidents_count + 1;
+}
+
+/* Encodes `relay_resp` and raises it as a "wdp" relay event. Returns 0 on
+ * success, -EINVAL on encode failure (logged). */
+static int raise_relay_response(const cormoran_watchdog_RelayResponse *relay_resp) {
+    struct zmk_watchdog_relay_response resp_event = {.source = ZMK_RELAY_EVENT_SOURCE_SELF};
+    pb_ostream_t ostream = pb_ostream_from_buffer(resp_event.payload, sizeof(resp_event.payload));
+    if (!pb_encode(&ostream, cormoran_watchdog_RelayResponse_fields, relay_resp)) {
+        LOG_WRN("Failed to encode watchdog relay response: %s", PB_GET_ERROR(&ostream));
+        return -EINVAL;
+    }
+    resp_event.size = (uint16_t)ostream.bytes_written;
+
+    raise_zmk_watchdog_relay_response(resp_event);
+    return 0;
+}
+
+/* Streams `page` as one RelayResponse.incident_chunk event per incident,
+ * followed by one final done=true chunk -- see
+ * build_incident_chunk_response()'s doc comment for the exact sequence. */
+static void stream_incident_page(uint32_t request_id,
+                                 const cormoran_watchdog_IncidentPageResponse *page) {
+    uint32_t total_chunks = page->incidents_count + 1;
+    for (uint32_t i = 0; i < total_chunks; i++) {
+        cormoran_watchdog_RelayResponse relay_resp;
+        build_incident_chunk_response(request_id, page, i, &relay_resp);
+        if (raise_relay_response(&relay_resp) < 0) {
+            /* Encoding a single Incident + envelope should never fail given
+             * this file's own BUILD_ASSERTs above -- if it somehow does,
+             * stop here rather than raising a misleading partial stream. */
+            return;
+        }
+    }
+}
+
 static int on_watchdog_relay_request(const zmk_event_t *eh) {
     const struct zmk_watchdog_relay_request *ev = as_zmk_watchdog_relay_request(eh);
     if (!ev) {
         return 0;
     }
 
-    cormoran_watchdog_RelayResponse relay_resp;
-    if (watchdog_relay_exec_request(ev->payload, ev->size, &relay_resp) < 0) {
+    uint32_t request_id;
+    cormoran_watchdog_Response resp;
+    if (watchdog_relay_exec_request(ev->payload, ev->size, &request_id, &resp) < 0) {
         return 0;
     }
 
-    struct zmk_watchdog_relay_response resp_event = {.source = ZMK_RELAY_EVENT_SOURCE_SELF};
-    pb_ostream_t ostream = pb_ostream_from_buffer(resp_event.payload, sizeof(resp_event.payload));
-    if (!pb_encode(&ostream, cormoran_watchdog_RelayResponse_fields, &relay_resp)) {
-        LOG_WRN("Failed to encode watchdog relay response: %s", PB_GET_ERROR(&ostream));
+    if (resp.which_response_type == cormoran_watchdog_Response_incident_page_tag) {
+        stream_incident_page(request_id, &resp.response_type.incident_page);
         return 0;
     }
-    resp_event.size = (uint16_t)ostream.bytes_written;
 
-    raise_zmk_watchdog_relay_response(resp_event);
+    cormoran_watchdog_RelayResponse relay_resp =
+        (cormoran_watchdog_RelayResponse)cormoran_watchdog_RelayResponse_init_zero;
+    relay_resp.request_id = request_id;
+    relay_resp.which_relay_response_type = cormoran_watchdog_RelayResponse_response_tag;
+    response_to_relay_non_list_response(&resp, &relay_resp.relay_response_type.response);
+
+    raise_relay_response(&relay_resp);
     return 0;
 }
 
@@ -313,6 +451,111 @@ static int raise_watchdog_notification(cormoran_watchdog_Notification *notificat
     });
 }
 
+/* Builds a PeripheralResponse{source, request_id, response} Notification
+ * from `resp` and raises it once. Shared by both relay-response branches
+ * (single non-list response, and a fully-accumulated incident page) so the
+ * public Notification/Response shape the web UI expects is assembled in
+ * exactly one place. */
+static void raise_peripheral_response_notification(uint32_t source, uint32_t request_id,
+                                                   const cormoran_watchdog_Response *resp) {
+    k_mutex_lock(&peripheral_response_notification_lock, K_FOREVER);
+
+    peripheral_response_notification =
+        (cormoran_watchdog_Notification)cormoran_watchdog_Notification_init_zero;
+    peripheral_response_notification.which_notification_type =
+        cormoran_watchdog_Notification_peripheral_response_tag;
+    cormoran_watchdog_PeripheralResponse *pr =
+        &peripheral_response_notification.notification_type.peripheral_response;
+    pr->source = source;
+    pr->request_id = request_id;
+    pr->has_response = true;
+    pr->response = *resp;
+
+    int ret = raise_watchdog_notification(&peripheral_response_notification);
+    if (ret) {
+        LOG_WRN("Failed to raise watchdog PeripheralResponse notification: %d", ret);
+    }
+
+    k_mutex_unlock(&peripheral_response_notification_lock);
+}
+
+/* Accumulates in-flight ListIncidents incident_chunk events by request_id
+ * (DESIGN.md SS7.1). Only one relayed ListIncidents is realistically ever
+ * in flight at a time in this module's usage (the web UI awaits each
+ * PeripheralResponse before issuing the next request), so a single slot is
+ * enough -- a chunk for a different request_id than the one currently being
+ * accumulated simply restarts accumulation for the new request_id (treated
+ * as "the previous one will never complete", which is already true of any
+ * relay request whose peripheral disconencts mid-flight, see this file's
+ * top doc comment on timeouts). */
+/* Must match watchdog.options' IncidentPageResponse.incidents max_count --
+ * BUILD_ASSERT below keeps it in sync with the nanopb-generated array size
+ * rather than risking silent truncation if that option ever changes. */
+#define WATCHDOG_RELAY_INCIDENT_ACCUMULATOR_MAX_COUNT 4
+
+struct incident_chunk_accumulator {
+    bool active;
+    uint32_t request_id;
+    uint32_t source;
+    uint32_t total;
+    uint32_t start_index;
+    cormoran_watchdog_Incident incidents[WATCHDOG_RELAY_INCIDENT_ACCUMULATOR_MAX_COUNT];
+    size_t incidents_count;
+};
+
+BUILD_ASSERT(WATCHDOG_RELAY_INCIDENT_ACCUMULATOR_MAX_COUNT ==
+                 ARRAY_SIZE(((cormoran_watchdog_IncidentPageResponse *)NULL)->incidents),
+             "WATCHDOG_RELAY_INCIDENT_ACCUMULATOR_MAX_COUNT must match watchdog.options' "
+             "IncidentPageResponse.incidents max_count");
+
+static struct incident_chunk_accumulator chunk_accumulator;
+
+static void handle_incident_chunk(uint32_t source, uint32_t request_id,
+                                  const cormoran_watchdog_RelayIncidentChunk *chunk) {
+    if (!chunk_accumulator.active || chunk_accumulator.request_id != request_id) {
+        chunk_accumulator = (struct incident_chunk_accumulator){
+            .active = true,
+            .request_id = request_id,
+            .source = source,
+            .incidents_count = 0,
+        };
+    }
+
+    chunk_accumulator.total = chunk->total;
+    chunk_accumulator.start_index = chunk->start_index;
+
+    if (chunk->has_incident &&
+        chunk_accumulator.incidents_count < ARRAY_SIZE(chunk_accumulator.incidents)) {
+        cormoran_watchdog_Incident incident = chunk->incident;
+        /* Every Incident inside an incident_chunk was built by the
+         * peripheral's own watchdog_request_exec_handle() with source == 0
+         * (see the doc comment in watchdog_request_exec.c) -- stamp the
+         * real source now that it is known, mirroring the top-level
+         * PeripheralResponse.source convention. */
+        incident.source = source;
+        chunk_accumulator.incidents[chunk_accumulator.incidents_count++] = incident;
+    }
+
+    if (!chunk->done) {
+        return;
+    }
+
+    cormoran_watchdog_Response resp =
+        (cormoran_watchdog_Response)cormoran_watchdog_Response_init_zero;
+    resp.which_response_type = cormoran_watchdog_Response_incident_page_tag;
+    cormoran_watchdog_IncidentPageResponse *page = &resp.response_type.incident_page;
+    page->total = chunk_accumulator.total;
+    page->start_index = chunk_accumulator.start_index;
+    page->incidents_count = chunk_accumulator.incidents_count;
+    for (size_t i = 0; i < chunk_accumulator.incidents_count; i++) {
+        page->incidents[i] = chunk_accumulator.incidents[i];
+    }
+
+    raise_peripheral_response_notification(source, request_id, &resp);
+
+    chunk_accumulator.active = false;
+}
+
 static int on_watchdog_relay_response(const zmk_event_t *eh) {
     const struct zmk_watchdog_relay_response *ev = as_zmk_watchdog_relay_response(eh);
     if (!ev) {
@@ -326,44 +569,47 @@ static int on_watchdog_relay_response(const zmk_event_t *eh) {
         return 0;
     }
 
-    k_mutex_lock(&peripheral_response_notification_lock, K_FOREVER);
-
-    peripheral_response_notification =
-        (cormoran_watchdog_Notification)cormoran_watchdog_Notification_init_zero;
-    peripheral_response_notification.which_notification_type =
-        cormoran_watchdog_Notification_peripheral_response_tag;
-    cormoran_watchdog_PeripheralResponse *pr =
-        &peripheral_response_notification.notification_type.peripheral_response;
     /* ev->source was rewritten by ZMK_RELAY_EVENT_HANDLE's receive-side
      * `source_field_name = ev->source + 1` to the relaying peripheral's
      * slot + 1 -- exactly the addressing convention this module documents
      * for `source` elsewhere (0 = local/central, N = peripheral slot N). */
-    pr->source = ev->source;
-    pr->request_id = relay_resp.request_id;
-    pr->has_response = relay_resp.has_response;
-    if (relay_resp.has_response) {
-        pr->response = relay_resp.response;
-        /* Every Incident inside an IncidentPageResponse was built by the
-         * peripheral's own watchdog_request_exec_handle() with source == 0
-         * (see the doc comment in watchdog_request_exec.c) -- stamp the
-         * real source now that it is known, mirroring the top-level
-         * PeripheralResponse.source convention. */
-        if (relay_resp.response.which_response_type ==
-            cormoran_watchdog_Response_incident_page_tag) {
-            cormoran_watchdog_IncidentPageResponse *page =
-                &pr->response.response_type.incident_page;
-            for (size_t i = 0; i < page->incidents_count; i++) {
-                page->incidents[i].source = ev->source;
-            }
+    switch (relay_resp.which_relay_response_type) {
+    case cormoran_watchdog_RelayResponse_incident_chunk_tag:
+        handle_incident_chunk(ev->source, relay_resp.request_id,
+                              &relay_resp.relay_response_type.incident_chunk);
+        break;
+    case cormoran_watchdog_RelayResponse_response_tag: {
+        cormoran_watchdog_Response resp =
+            (cormoran_watchdog_Response)cormoran_watchdog_Response_init_zero;
+        const cormoran_watchdog_RelayNonListResponse *rnl =
+            &relay_resp.relay_response_type.response;
+        switch (rnl->which_relay_non_list_response_type) {
+        case cormoran_watchdog_RelayNonListResponse_status_tag:
+            resp.which_response_type = cormoran_watchdog_Response_status_tag;
+            resp.response_type.status = rnl->relay_non_list_response_type.status;
+            break;
+        case cormoran_watchdog_RelayNonListResponse_delete_result_tag:
+            resp.which_response_type = cormoran_watchdog_Response_delete_result_tag;
+            resp.response_type.delete_result = rnl->relay_non_list_response_type.delete_result;
+            break;
+        case cormoran_watchdog_RelayNonListResponse_inject_ack_tag:
+            resp.which_response_type = cormoran_watchdog_Response_inject_ack_tag;
+            resp.response_type.inject_ack = rnl->relay_non_list_response_type.inject_ack;
+            break;
+        case cormoran_watchdog_RelayNonListResponse_error_tag:
+        default:
+            resp.which_response_type = cormoran_watchdog_Response_error_tag;
+            resp.response_type.error = rnl->relay_non_list_response_type.error;
+            break;
         }
+        raise_peripheral_response_notification(ev->source, relay_resp.request_id, &resp);
+        break;
+    }
+    default:
+        LOG_WRN("Watchdog relay response with no relay_response_type set");
+        break;
     }
 
-    int ret = raise_watchdog_notification(&peripheral_response_notification);
-    if (ret) {
-        LOG_WRN("Failed to raise watchdog PeripheralResponse notification: %d", ret);
-    }
-
-    k_mutex_unlock(&peripheral_response_notification_lock);
     return 0;
 }
 
@@ -527,32 +773,89 @@ static int watchdog_split_relay_test_init(void) {
         return -EIO;
     }
 
-    cormoran_watchdog_RelayResponse relay_resp;
-    int ret = watchdog_relay_exec_request(payload, ostream.bytes_written, &relay_resp);
+    uint32_t request_id;
+    cormoran_watchdog_Response resp;
+    int ret = watchdog_relay_exec_request(payload, ostream.bytes_written, &request_id, &resp);
     if (ret < 0) {
         LOG_ERR("Split relay test: exec failed: %d", ret);
         return ret;
     }
 
-    if (relay_resp.request_id != 42) {
-        LOG_ERR("Split relay test: request_id mismatch: got %u", relay_resp.request_id);
+    if (request_id != 42) {
+        LOG_ERR("Split relay test: request_id mismatch: got %u", request_id);
         return -EINVAL;
     }
-    if (relay_resp.response.which_response_type != cormoran_watchdog_Response_incident_page_tag) {
+    if (resp.which_response_type != cormoran_watchdog_Response_incident_page_tag) {
         LOG_ERR("Split relay test: expected an IncidentPage, got response type %d",
-                relay_resp.response.which_response_type);
+                resp.which_response_type);
         return -EINVAL;
     }
-    if (relay_resp.response.response_type.incident_page.incidents_count != 1 ||
-        relay_resp.response.response_type.incident_page.incidents[0].source != 0) {
+    if (resp.response_type.incident_page.incidents_count != 1 ||
+        resp.response_type.incident_page.incidents[0].source != 0) {
         LOG_ERR("Split relay test: expected 1 incident with source 0 (stamped later by the "
                 "central), got count=%u source=%u",
-                (unsigned int)relay_resp.response.response_type.incident_page.incidents_count,
-                relay_resp.response.response_type.incident_page.incidents[0].source);
+                (unsigned int)resp.response_type.incident_page.incidents_count,
+                resp.response_type.incident_page.incidents[0].source);
         return -EINVAL;
     }
 
     printk("PASS: watchdog_split_relay_list_incidents\n");
+
+    /* build_incident_chunk_response() (the same helper
+     * on_watchdog_relay_request() -> stream_incident_page() calls to build
+     * each event it raises) must produce exactly N+1 chunks for an N-incident
+     * page -- one incident_chunk{done:false, incident:incidents[i]} per
+     * incident, then a final incident_chunk{done:true} with no incident, all
+     * sharing this request's request_id/total/start_index (DESIGN.md SS7.1).
+     * Exercised directly (rather than via stream_incident_page()'s
+     * raise_zmk_watchdog_relay_response(), which needs the real split
+     * transport) since this is exactly the seam the peripheral responder
+     * itself is built from. */
+    {
+        const cormoran_watchdog_IncidentPageResponse *page = &resp.response_type.incident_page;
+        uint32_t total_chunks = 0;
+        for (uint32_t i = 0;; i++) {
+            cormoran_watchdog_RelayResponse chunk_resp;
+            total_chunks = build_incident_chunk_response(request_id, page, i, &chunk_resp);
+            if (chunk_resp.which_relay_response_type !=
+                cormoran_watchdog_RelayResponse_incident_chunk_tag) {
+                LOG_ERR("Split relay test: chunk %u has no incident_chunk set", i);
+                return -EINVAL;
+            }
+            const cormoran_watchdog_RelayIncidentChunk *chunk =
+                &chunk_resp.relay_response_type.incident_chunk;
+            if (chunk_resp.request_id != request_id || chunk->total != page->total ||
+                chunk->start_index != page->start_index) {
+                LOG_ERR("Split relay test: chunk %u envelope mismatch", i);
+                return -EINVAL;
+            }
+            if (i < page->incidents_count) {
+                if (chunk->done || !chunk->has_incident ||
+                    chunk->incident.id != page->incidents[i].id) {
+                    LOG_ERR("Split relay test: chunk %u expected incident %u, got done=%d "
+                            "has_incident=%d",
+                            i, page->incidents[i].id, chunk->done, chunk->has_incident);
+                    return -EINVAL;
+                }
+            } else {
+                if (!chunk->done || chunk->has_incident) {
+                    LOG_ERR(
+                        "Split relay test: final chunk %u expected done=true has_incident=false, "
+                        "got done=%d has_incident=%d",
+                        i, chunk->done, chunk->has_incident);
+                    return -EINVAL;
+                }
+                break;
+            }
+        }
+        if (total_chunks != page->incidents_count + 1) {
+            LOG_ERR("Split relay test: expected %u total chunks (N incidents + 1 done), got %u",
+                    (unsigned int)page->incidents_count + 1, total_chunks);
+            return -EINVAL;
+        }
+    }
+
+    printk("PASS: watchdog_split_relay_incident_chunk_stream\n");
 
     /* DeleteIncidents relayed the same way. */
     cormoran_watchdog_RelayRequest del_relay_req = cormoran_watchdog_RelayRequest_init_zero;
@@ -566,16 +869,15 @@ static int watchdog_split_relay_test_init(void) {
         LOG_ERR("Split relay test: failed to encode delete request: %s", PB_GET_ERROR(&ostream));
         return -EIO;
     }
-    ret = watchdog_relay_exec_request(payload, ostream.bytes_written, &relay_resp);
+    ret = watchdog_relay_exec_request(payload, ostream.bytes_written, &request_id, &resp);
     if (ret < 0) {
         LOG_ERR("Split relay test: delete exec failed: %d", ret);
         return ret;
     }
-    if (relay_resp.response.which_response_type != cormoran_watchdog_Response_delete_result_tag ||
-        relay_resp.response.response_type.delete_result.deleted != 1) {
+    if (resp.which_response_type != cormoran_watchdog_Response_delete_result_tag ||
+        resp.response_type.delete_result.deleted != 1) {
         LOG_ERR("Split relay test: expected delete_result.deleted=1, got type=%d deleted=%u",
-                relay_resp.response.which_response_type,
-                relay_resp.response.response_type.delete_result.deleted);
+                resp.which_response_type, resp.response_type.delete_result.deleted);
         return -EINVAL;
     }
 
@@ -592,15 +894,15 @@ static int watchdog_split_relay_test_init(void) {
         LOG_ERR("Split relay test: failed to encode empty request: %s", PB_GET_ERROR(&ostream));
         return -EIO;
     }
-    ret = watchdog_relay_exec_request(payload, ostream.bytes_written, &relay_resp);
+    ret = watchdog_relay_exec_request(payload, ostream.bytes_written, &request_id, &resp);
     if (ret < 0) {
         LOG_ERR("Split relay test: empty-request exec failed: %d", ret);
         return ret;
     }
-    if (relay_resp.response.which_response_type != cormoran_watchdog_Response_error_tag) {
+    if (resp.which_response_type != cormoran_watchdog_Response_error_tag) {
         LOG_ERR("Split relay test: expected an ErrorResponse for an unset request kind, got "
                 "response type %d",
-                relay_resp.response.which_response_type);
+                resp.which_response_type);
         return -EINVAL;
     }
 

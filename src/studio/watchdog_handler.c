@@ -25,39 +25,6 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
-/*
- * Response size budget (DESIGN.md SS8): the worst case is IncidentPage with
- * WATCHDOG_RPC_PAGE_SIZE (3, see src/studio/watchdog_request_exec.c) FatalDetail
- * incidents (the largest detail variant -- reason/pc/lr uint32 fields + a
- * 16-byte thread_name string).
- *
- * Per-Incident encoded size, upper bound:
- *   id, source, type, boot_ordinal, uptime_s (5 uint32 fields)  ~= 5 * 6  = 30
- *   detail oneof submessage tag+len                             ~=        2
- *   FatalDetail: reason,pc,lr (3 uint32 fields)                 ~= 3 * 6  = 18
- *   FatalDetail: thread_name (tag+len+15 chars)                  ~=       18
- *   Incident submessage tag+len (repeated field entry)           ~=        2
- *   ------------------------------------------------------------------
- *   per incident                                                ~=       70
- *
- * 3 incidents                                                    ~=      210
- * IncidentPageResponse.total + start_index (2 uint32 fields)      ~=       12
- * Response oneof wrapper (tag+len)                                ~=        4
- * ------------------------------------------------------------------------
- * total                                                           ~=      226
- *
- * Rounded up with headroom -> comfortably under a 512-byte TX buffer.
- * CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512 is configured in
- * tests/studio/native_sim.conf and tests/zmk-config/build.yaml. (Page size
- * is 3 rather than 4 because it is shared with the split relay path -- see
- * watchdog.options' comment on IncidentPageResponse.incidents max_count.)
- */
-#define WATCHDOG_RPC_ESTIMATED_MAX_RESPONSE_SIZE 226
-
-BUILD_ASSERT(WATCHDOG_RPC_ESTIMATED_MAX_RESPONSE_SIZE + 64 <= CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE,
-             "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE is too small for a full watchdog IncidentPage "
-             "response -- see the arithmetic comment above");
-
 static struct zmk_rpc_custom_subsystem_meta watchdog_feature_meta = {
     ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("http://cormoran.github.io/zmk-feature-watchdog/"),
     // Unsecured is suggested by default to avoid unlocking in un-reliable

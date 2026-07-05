@@ -77,9 +77,6 @@ For more info on modules, you can read through through the [Zephyr modules page]
    CONFIG_ZMK_STUDIO=y
    CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y
    CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
-   # IncidentPage responses (up to 3 incidents per page) need more than the
-   # default 64-byte TX buffer.
-   CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
    ```
 
    **Important conflict note**: `CONFIG_ZMK_WATCHDOG_FATAL_DETECT` overrides

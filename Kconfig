@@ -54,9 +54,11 @@ config ZMK_WATCHDOG_SPLIT_RELAY
       nonzero `source` is relayed to the matching peripheral over
       CONFIG_ZMK_SPLIT_RELAY_EVENT, and the response arrives back as a
       PeripheralResponse Studio notification (relaying is asynchronous,
-      unlike a local request). Increase CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
-      if your build fails a BUILD_ASSERT about the relayed request/response
-      payload size.
+      unlike a local request). A ListIncidents answer streams one incident
+      per relay event rather than a whole page in one event, so
+      CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN never needs to be raised above
+      its framework default for this module (see src/split/watchdog_relay.c's
+      BUILD_ASSERTs and DESIGN.md SS7.1).
       Note: the underlying split relay event transport broadcasts to every
       connected peripheral, not to one addressed peripheral -- with more
       than one peripheral, every peripheral answers every relayed request

@@ -15,16 +15,15 @@
 
 /*
  * WATCHDOG_RPC_PAGE_SIZE must match watchdog.options'
- * IncidentPageResponse.incidents max_count (3) -- see that file's comment
- * for why 3, not 4: a relayed RelayResponse wrapping a full page must fit
- * the split relay transport's 255-byte hard ceiling (checked in
- * src/split/watchdog_relay.c), which one more incident would blow past. The
- * local-RPC-path size estimate/BUILD_ASSERT against
- * CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE stays in src/studio/watchdog_handler.c
- * (this file has no notion of the Studio RPC TX buffer -- a peripheral
- * executing a relayed request has no Studio RPC subsystem at all).
+ * IncidentPageResponse.incidents max_count (4) -- a pure UX choice
+ * (DESIGN.md SS7.1/SS7.2): the split relay path streams one incident per
+ * relay event rather than embedding a whole page in one relay event, so
+ * this is no longer constrained by the split relay transport's 255-byte
+ * hard ceiling, nor by CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE (a genuine
+ * streaming ring buffer that never needs a whole response to fit in one
+ * buffer either -- see src/studio/watchdog_handler.c).
  */
-#define WATCHDOG_RPC_PAGE_SIZE 3
+#define WATCHDOG_RPC_PAGE_SIZE 4
 
 void watchdog_incident_record_to_proto(uint16_t id, uint32_t source,
                                        const struct zmk_watchdog_incident_record *rec,
