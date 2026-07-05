@@ -1,0 +1,441 @@
+# zmk-feature-watchdog — Design
+
+Status: **design complete, implementation not started.**
+This document is the source of truth for implementation. It is written to be
+self-contained: an implementing agent should be able to work from this file,
+the referenced source files, and the workspace skills, without re-doing the
+exploration that produced it.
+
+## 1. Goal
+
+Detect situations where firmware instability makes the keyboard unusable,
+and record them as persistent incident logs that the user can inspect and
+delete from a web page (custom ZMK Studio RPC + WebSerial UI).
+
+Requirements from the project owner:
+
+- Detect **long thread freezes** (keyboard stops responding but no crash).
+- Detect **hard faults** (stack overflow, bus fault, kernel oops/panic, …).
+- Detect anything else that is cheaply observable (see §4.3 reset-cause audit).
+- Logs are viewable and deletable from a web page.
+- **Flash-wear protection is a hard requirement**: incident count is capped;
+  when the cap is reached, recording **stops** until the user deletes logs
+  from the web page. No ring-buffer overwrite.
+- Works on **split-keyboard peripherals**; peripheral→central transport uses
+  the event relay implemented in the cormoran/zmk fork
+  (`main+custom-studio-protocol`).
+- Hardware validation on this workspace's XIAO nRF52840 + J-Link rig.
+
+## 2. Non-goals (v1)
+
+- Full post-mortem coredumps (Zephyr `CONFIG_DEBUG_COREDUMP` is heavier than
+  needed; our fixed-size incident record is enough to identify the failing
+  thread/PC). Possible future work.
+- Wall-clock timestamps (no RTC; we record `uptime` + `boot_count` instead).
+- Per-peripheral addressing of relay messages (the relay broadcasts to all
+  peripherals; responses carry a `source` slot so the central can tell them
+  apart).
+- Detecting freezes of the BLE controller/radio itself (if the whole CPU
+  locks up, the **hardware watchdog fallback** still resets and we log a
+  degraded "hardware reset, no detail" incident from the reset cause).
+
+## 3. Big picture
+
+```
+            ┌────────────── incident time (may be ISR / fault context) ──────────────┐
+ detector ──► fill fixed-size record in __noinit "pending incident" RAM slot ──► sys_reboot()
+            └──────────────────────────────────────────────────────────────────────┘
+                                        reboot
+            ┌────────────── next boot (settings ready, workqueue ctx) ──────────────┐
+ boot hook ─► validate magic+CRC of pending slot ─► append to flash log (Zephyr     │
+            │  settings, key per slot) unless cap reached ─► clear pending slot     │
+            └──────────────────────────────────────────────────────────────────────┘
+                                        later
+ web UI ◄─ Studio RPC (central only) ◄─ local store ── and, for peripherals:
+ web UI ◄─ Studio notifications ◄─ central proxy ◄─ relay events ◄─ peripheral store
+```
+
+Key principle: **never write flash at incident time.** Fault/watchdog context
+is not safe for flash writes. Incidents cross the reboot in retained RAM and
+are persisted by a normal boot-time init hook. Each half (central and
+peripheral) detects and stores **its own** incidents locally; the central
+proxies read/delete requests to peripherals on demand.
+
+## 4. Detection layer
+
+### 4.1 Thread freeze (task watchdog)
+
+Use Zephyr's task watchdog (`subsys/task_wdt`,
+`include/zephyr/task_wdt/task_wdt.h`):
+
+- `task_wdt_init(hw_wdt)` — pass the nRF `wdt0` device when
+  `ZMK_WATCHDOG_HW_FALLBACK` is enabled (real boards), `NULL` on native_sim.
+- One `task_wdt_add(timeout, callback, user_data)` **channel per monitored
+  work queue**. Feeding is done by a self-rescheduling `k_work_delayable`
+  submitted **to the monitored queue**: if the queue is blocked/starved
+  longer than the timeout, the feed never runs and the channel fires.
+- Monitored queues (v1):
+  1. **system workqueue** (`&k_sys_work_q`) — kscan/event-manager processing
+     lives here; a blocked sysworkq = unusable keyboard. Always monitored.
+  2. **ZMK low-priority work queue** (`zmk/app/src/workqueue.c`,
+     `zmk_workqueue_lowprio_work_q()`) — monitored when available.
+  Others (HoG queue, split service queue) are candidates for a later phase;
+  keep the monitor table data-driven (array of `{queue getter, name}`) so
+  adding one is a one-line change.
+- Timeout: `CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS`, default **5000 ms**
+  (well above worst-case legitimate stalls like BLE connection storms or
+  settings writes; short enough to match "user notices the keyboard died").
+  Feed period = timeout / 4.
+- The task_wdt callback runs in **ISR (timer) context**: it must only fill
+  the retained-RAM pending record (freeze detail: channel id, queue name,
+  uptime, boot count) and call `sys_reboot(SYS_REBOOT_WARM)`.
+- **Hardware WDT fallback** (`CONFIG_TASK_WDT_HW_FALLBACK`, nRF `wdt0`):
+  if even the task_wdt timer ISR can't run (hard lockup, IRQ storm), the
+  hardware watchdog resets the chip. No retained record is written in that
+  case — the next boot logs a degraded incident from the reset cause (§4.3).
+- **Debugger interaction (important on this rig): verified safe.** This
+  tree's `task_wdt` calls `wdt_setup(hw_wdt_dev, WDT_OPT_PAUSE_HALTED_BY_DBG)`
+  (`zephyr/subsys/task_wdt/task_wdt.c:181`), so a J-Link halt pauses the
+  hardware WDT. `CONFIG_ZMK_WATCHDOG_HW_FALLBACK` still exists so builds
+  can disable the HW layer independently of software freeze detection.
+  Note: the *software* task_wdt timer still fires during long halts —
+  expect a spurious FREEZE incident after resuming from a multi-second
+  breakpoint; that's acceptable for a debug rig.
+
+### 4.2 Fatal errors (hard fault, stack overflow, oops/panic)
+
+Override the weak `k_sys_fatal_error_handler(unsigned int reason, const
+struct arch_esf *esf)` (`zephyr/include/zephyr/fatal.h`; **ZMK does not
+override it** — verified in the fork, so no symbol clash; note in README
+that any other module overriding it conflicts).
+
+- Record: `reason` (`K_ERR_CPU_EXCEPTION`, `K_ERR_STACK_CHK_FAIL`,
+  `K_ERR_KERNEL_OOPS`, `K_ERR_KERNEL_PANIC`, …), `esf->basic.pc`,
+  `esf->basic.lr`, current thread name (`k_thread_name_get(k_current_get())`,
+  requires `CONFIG_THREAD_NAME`; store "?" when unavailable), uptime,
+  boot count. `esf` may be NULL — handle it.
+- Then `sys_reboot(SYS_REBOOT_WARM)`. Never return. (Upstream default would
+  halt forever — rebooting is itself a usability improvement.)
+- Handler must be minimal: no logging subsystem calls except `LOG_PANIC()`,
+  no threading APIs, no flash.
+- Stack overflow detectability depends on `CONFIG_HW_STACK_PROTECTION`
+  (MPU, available on nRF52840, default y in Zephyr for cortex-m with MPU)
+  → arrives as `K_ERR_STACK_CHK_FAIL` / MPU fault. Document in README;
+  don't force-select.
+
+### 4.3 Boot-time reset-cause audit
+
+At boot, `hwinfo_get_reset_cause()` (`drivers/hwinfo`, nRF impl maps
+`RESET_WATCHDOG` BIT(4), `RESET_CPU_LOCKUP` BIT(8), `RESET_BROWNOUT`
+BIT(2)):
+
+- If the cause contains WATCHDOG / CPU_LOCKUP / BROWNOUT **and** there is no
+  pending retained record explaining it, log a `RESET_CAUSE` incident with
+  the raw cause bits. This is the degraded path that catches hard-WDT resets
+  and lockups where no software ran.
+- Call `hwinfo_clear_reset_cause()` after reading (nRF cause bits accumulate
+  across resets; without clearing, every boot re-reports old causes).
+- Not available on native_sim (returns 0 causes) — code must treat "no
+  causes" as normal.
+
+### 4.4 Test/fault injection (for hardware validation)
+
+A separate Kconfig (`CONFIG_ZMK_WATCHDOG_TEST_INJECTION`, default n, enabled
+in test firmware only) adds RPC requests that deliberately:
+
+- block the system workqueue forever (`k_sleep(K_FOREVER)` in a work item) →
+  validates freeze path end-to-end;
+- `k_oops()` / NULL-function-pointer call → validates fatal path;
+
+Without this, hardware validation of a watchdog is impossible. It must be
+clearly marked dangerous and default-off.
+
+## 5. Crossing the reboot: retained RAM pending slot
+
+A single static `__noinit` struct (no devicetree overlay needed — simplest
+and board-agnostic):
+
+```c
+struct zmk_watchdog_pending {
+    uint32_t magic;           /* 0x57444741 'WDGA' */
+    struct zmk_watchdog_incident_record record;  /* fixed-size, §6 */
+    uint32_t crc;             /* crc32_ieee over record */
+} __noinit_section;           /* plain __noinit static */
+```
+
+- nRF52840 SRAM survives `SYSRESETREQ` (verified fact on this rig — even RTT
+  buffers survive reflash; see skills/develop-zmk-module hardware-rig notes).
+- Boot hook (`SYS_INIT`, `APPLICATION` level, then deferred to the low-prio
+  workqueue once settings are loaded — remember the pitfall that
+  `settings_load()` runs from `main()` **after** all SYS_INIT levels):
+  validate magic+CRC → hand record to the store (§6) → zero the slot.
+- CRC + magic makes cold boots / bootloader-clobbered RAM safe (record is
+  simply discarded).
+- native_sim: `__noinit` does **not** survive process restart; unit tests
+  inject records by calling the boot-conversion function directly.
+
+## 6. Storage layer (both roles)
+
+**Backend: raw Zephyr settings subsystem** (not zmk-feature-custom-settings).
+Rationale: peripherals must store incidents too and shouldn't pull in the
+custom-settings RPC machinery; a fixed-size binary record with a key per
+slot maps directly onto settings; and it avoids custom-settings' RAM-cache
+overhead and macro pitfalls. (ZMK `imply SETTINGS` covers real boards;
+BLE bonds already require settings on both halves. native_sim tests must
+enable `CONFIG_SETTINGS` + a backend explicitly — ARCH_POSIX is excluded
+from ZMK's imply.)
+
+- Keys: `wdg/i/<slot>` (record blob), slots `0..CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS-1`.
+- Record: one fixed-size packed struct `zmk_watchdog_incident_record`
+  (target ≤ 64 bytes; **hard limit: must fit a relay event payload**, i.e.
+  ≤ `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` (default 128) with headroom):
+  `{ uint16 id; uint8 type; uint8 flags; uint32 boot_count; uint32 uptime_s;
+     union detail { freeze{...}; fatal{reason,pc,lr,thread[16]}; reset{cause}; } }`
+  plus a record-format version byte for forward compatibility.
+- In-RAM index: bitmap of used slots + copy of records (≤ 16×64 B = 1 KiB,
+  acceptable; keeps RPC list handling out of flash-read paths). Built at
+  boot by `settings_load_subtree("wdg")` handler.
+- **Cap semantics (the flash-wear guarantee):** append picks the first free
+  slot; if none, the incident is **dropped** and only a RAM
+  `dropped_since_boot` counter increments (no flash write at all).
+  Deleting a slot (`settings_delete`) frees it for future incidents.
+- `boot_count`: a `wdg/meta` settings entry incremented once per boot?
+  **No** — that would write flash on every boot (wear). Instead increment
+  it **only when an incident is persisted** (store "incident ordinal") and
+  keep relative ordering by `id` = monotonically increasing ordinal stored
+  in `wdg/meta` alongside — one small meta write per incident, amortized
+  into the same event. uptime still distinguishes incidents within a boot.
+
+## 7. Split support (peripheral ↔ central)
+
+Studio RPC exists **only on the central** (`ZMK_STUDIO_RPC` is gated on
+`!ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL`). Peripherals detect and store
+locally (§4–6 run identically on both roles); the central **proxies**
+web-UI requests over the event relay, copying the proven pattern from
+`zmk-driver-pmw3610-with-custom-studio-rpc/src/split/pmw3610_relay.c`.
+
+Relay API (fork `main+custom-studio-protocol`,
+`app/include/zmk/event_manager.h`):
+
+- `ZMK_RELAY_EVENT_HANDLE(type, "id4", source_field)` — receive side.
+- `ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL(type, "id4", source_field)` /
+  `ZMK_RELAY_EVENT_PERIPHERAL_TO_CENTRAL(...)` — send side; only forwards
+  events whose source field is `ZMK_RELAY_EVENT_SOURCE_SELF` (0xFF).
+- Receive rewrites `source` to sender slot + 1; central = 0.
+- Payload ≤ `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` (default 128, hard wire
+  ceiling 255); identifier ≤ 4 chars. `BUILD_ASSERT` both.
+- Requires `CONFIG_ZMK_SPLIT_RELAY_EVENT=y`; central→peripheral is a
+  broadcast to all peripherals.
+
+Events (identifiers): `"wdq"` request (central→peripheral: list / delete /
+status, tiny nanopb-encoded payload) and `"wdp"` response
+(peripheral→central: **one incident record per event** — a record ≤64 B fits
+one relay payload; plus status/ack/done messages with an incident count).
+
+Flow for the web UI reading peripheral logs (async, as in pmw3610):
+
+1. Web → central RPC `ListIncidents{source: N}` → handler raises `"wdq"`
+   relay request, responds immediately with an ack (`in_progress = true`).
+2. Peripheral receives, walks its store, raises one `"wdp"` response per
+   record + a final `done{count}`.
+3. Central receives `"wdp"` events and forwards each as a **Studio custom
+   notification** (`raise_zmk_studio_custom_notification`, encoded from the
+   module's proto `Notification` message) to the web UI, which accumulates
+   them.
+4. Delete works the same with a small ack (deleted count).
+
+Timeouts: web-side (react) 3 s wait for `done`; peripheral absent/disconnected
+⇒ central knows connected slots? — it doesn't reliably; keep it simple: the
+UI shows "no response" after timeout. Document as v1 limitation.
+
+Central's own logs are answered **synchronously** in the RPC response
+(paginated, §8) — no relay involved for source 0.
+
+## 8. Studio RPC + proto
+
+Subsystem identifier: `cormoran__watchdog` (created by the template's
+`init_module.py`). Proto package `cormoran.watchdog` at
+`proto/cormoran/watchdog/watchdog.proto` (+ `.options` file — every
+string/bytes needs `max_size`; **no 64-bit types**; set `has_<field>=true`
+for every sub-message — nanopb pitfalls from skills/develop-zmk-module).
+
+Messages (sketch — implementer finalizes):
+
+```proto
+Request  = oneof { GetStatus, ListIncidents{source,start}, DeleteIncidents{source, ids[], all}, InjectTest{kind} }
+Response = oneof { Error{msg}, Status, IncidentPage, DeleteResult{deleted,in_progress}, InjectAck }
+Status   = { capacity, stored, dropped_since_boot, recording_stopped, split_supported }
+Incident = { id, source, type enum{FREEZE,FATAL,RESET_CAUSE}, boot_ordinal, uptime_s,
+             oneof detail { Freeze{queue_name}, Fatal{reason,pc,lr,thread_name}, Reset{cause_bits} } }
+IncidentPage = { total, start, incidents[≤4], in_progress /* true when relayed */ }
+Notification = oneof { RelayedIncident{Incident}, RelayDone{source,count}, RelayDeleteResult{source,deleted},
+                       IncidentRecorded{Incident} /* optional live push when a new incident is persisted */ }
+```
+
+- **Pagination instead of streaming**: ≤ 4 incidents per response keeps the
+  encoded response comfortably under a 512-byte TX buffer
+  (`CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512` in test configs +
+  `BUILD_ASSERT(encoded_max + 64 <= TX_BUF)`); response structs in
+  **static** storage (encoding runs after the handler returns).
+- `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128` as usual.
+- Kconfig: `ZMK_WATCHDOG_STUDIO_RPC` depends **only on `ZMK_STUDIO`** (not
+  on the detectors) and handlers must work with an empty store — this is
+  what lets native_sim unit tests drive the whole RPC surface (zero-device
+  pitfall from skills/develop-zmk-module).
+
+## 9. Web UI
+
+Extend the template's `web/src/App.tsx` (React +
+`@cormoran/zmk-studio-react-hook`, `ZMKCustomSubsystem.callRPC`, generated
+ts-proto types via `buf generate`):
+
+- **Status card**: capacity, stored count, `recording_stopped` banner
+  ("log full — recording paused; delete incidents to resume"),
+  dropped-since-boot counter.
+- **Incident table**: id, source (Central / Peripheral N), type badge,
+  boot ordinal + uptime, detail column (thread/queue name, reason+PC/LR in
+  hex, reset-cause bits decoded to names). Source selector triggers the
+  relay flow for peripherals and accumulates notification-delivered rows.
+- **Delete**: per-row delete + "delete all (this source)" with confirm.
+- Subscribe to notifications for relayed rows / completion / live
+  `IncidentRecorded`.
+- Keep the template's connection scaffold; this is one page, no routing.
+
+## 10. Kconfig summary
+
+Template initialization produced `CONFIG_ZMK_WATCHDOG_FEATURE` and
+`CONFIG_ZMK_WATCHDOG_FEATURE_STUDIO_RPC` (mechanical rename of
+`ZMK_TEMPLATE_FEATURE*`). **Phase B renames these** to the table below
+(`ZMK_WATCHDOG`, `ZMK_WATCHDOG_STUDIO_RPC`) — grep every reference:
+`Kconfig`, `CMakeLists.txt`, `tests/studio/native_sim.conf`,
+`tests/zmk-config/build.yaml`, README, and the keycode_events snapshot's
+registration expectations if config names appear there.
+
+| Symbol | Default | Meaning |
+|---|---|---|
+| `ZMK_WATCHDOG` | n | core: store + boot hook + reset-cause audit |
+| `ZMK_WATCHDOG_FREEZE_DETECT` | y if ZMK_WATCHDOG | task_wdt monitor (selects `TASK_WDT`) |
+| `ZMK_WATCHDOG_FREEZE_TIMEOUT_MS` | 5000 | freeze threshold |
+| `ZMK_WATCHDOG_HW_FALLBACK` | y (n on native_sim) | hardware WDT backing (`TASK_WDT_HW_FALLBACK`) |
+| `ZMK_WATCHDOG_FATAL_DETECT` | y if ZMK_WATCHDOG | fatal-handler override |
+| `ZMK_WATCHDOG_MAX_INCIDENTS` | 16 | flash slot cap (per half) |
+| `ZMK_WATCHDOG_STUDIO_RPC` | y if ZMK_STUDIO && ZMK_WATCHDOG | RPC subsystem (central) |
+| `ZMK_WATCHDOG_SPLIT_RELAY` | y if ZMK_SPLIT && ZMK_WATCHDOG | relay proxy/responder (needs `ZMK_SPLIT_RELAY_EVENT`) |
+| `ZMK_WATCHDOG_TEST_INJECTION` | n | dangerous fault/freeze injection RPC |
+
+## 11. Source layout
+
+```
+src/watchdog_store.c        # settings-backed slot store + RAM index + cap
+src/watchdog_pending.c      # __noinit slot, CRC, boot conversion hook
+src/watchdog_freeze.c       # task_wdt channels + feed works
+src/watchdog_fatal.c        # k_sys_fatal_error_handler override
+src/watchdog_reset_cause.c  # boot-time hwinfo audit
+src/watchdog_inject.c       # test injection (Kconfig-gated)
+src/split/watchdog_relay.c  # wdq/wdp events, peripheral responder, central proxy
+src/studio/watchdog_handler.c
+include/cormoran/zmk/watchdog.h   # record struct, store API (used by tests)
+proto/cormoran/watchdog/watchdog.proto|.options
+web/src/App.tsx (+ components)
+tests/...                   # see §12
+```
+
+`reboot` and `time` are wrapped behind tiny functions (`watchdog_reboot()`,
+weak/testable) so native_sim tests can intercept instead of dying.
+
+## 12. Test plan
+
+**native_sim unit tests** (`west zmk-test tests -m .`, via `python3 -m unittest`):
+
+- store: append/read/delete/cap-stop/drop-count/persistence-across-
+  `settings_load` (needs `CONFIG_SETTINGS` + backend in native_sim conf —
+  check what the template/custom-settings tests already enable and copy).
+- pending: fabricate record → boot-convert → appears in store; bad CRC →
+  discarded.
+- freeze: block a monitored queue in a test work item → task_wdt callback →
+  (intercepted reboot) → pending slot filled correctly.
+- RPC: full request/response matrix against an empty and a populated store,
+  pagination boundaries, delete, status; injection ack.
+- relay: raise synthetic `wdq`/`wdp` events at the handlers directly
+  (both role compile paths built by build tests).
+
+**build tests** (`tests/zmk-config/build.yaml`): xiao_ble + tester_xiao
+central-with-studio build; a split peripheral build with relay on; a
+minimal no-studio build (core only). Use snippets under
+`tests/zmk-config/snippets/` (remember the `RC()` macro clash and
+tester_xiao pin-conflict pitfalls if any overlay is added).
+
+**Hardware (Phase F)** on this rig (read
+`skills/develop-zmk-module/references/hardware-rig.md` + `skills/debug-zmk-jlink`
+first — flash offset `CONFIG_FLASH_LOAD_OFFSET=0x0` workaround, RTT read via
+JLinkExe `savebin`, RTT control-block zeroing before reflash,
+`CONFIG_LOG_PROCESS_THREAD_STARTUP_DELAY_MS=0`, pyusb RPC transport):
+
+1. Flash test build (`ZMK_WATCHDOG_TEST_INJECTION=y`, studio on).
+2. `inject freeze` → observe reboot → `list` shows FREEZE incident with the
+   right queue name; RTT log confirms boot-time conversion.
+3. `inject fault` → FATAL incident with plausible PC/LR.
+4. Repeat until cap → `status.recording_stopped=true`, further injections
+   only bump `dropped_since_boot`.
+5. `delete all` → recording resumes.
+6. WDT-vs-debugger sanity: J-Link halt while HW fallback on — confirm
+   expected behavior per §4.1 decision.
+7. Web UI smoke test if a browser is available; otherwise the pyusb CLI
+   (`tools/zmk-studio-rpc custom-call`) covers the RPC surface.
+
+Split relay on real hardware is **out of scope for this rig** (one board);
+covered by native_sim/relay unit tests + split build tests. Note this in the
+final report.
+
+## 13. Implementation phases (each = one subagent task)
+
+Phase A — **done** (commit "Initialize zmk-feature-watchdog from module
+template" on `codex/init-watchdog`, pushed). State: placeholders replaced
+(`namespace=cormoran module=watchdog`, subsystem id `cormoran__watchdog`,
+sample handler at `src/studio/watchdog_handler.c`, proto at
+`proto/cormoran/watchdog/watchdog.proto`); isolated west workspace ready
+(`./dependencies`, ~3.9 GB, gitignored); `python3 -m unittest`, all web
+checks, and `SKIP=prettier,eslint,jest,web-build pre-commit run --all-files`
+green. Known quirks: the Studio subsystem registration order in
+`tests/studio/keycode_events.snapshot` is runtime order, not alphabetical —
+re-capture from actual output when it changes; `.github/workflows/template-sync.yml`
+intentionally still points at the upstream template.
+
+- **Phase B — store + pending + boot hook.** §5, §6, Kconfig core, unit
+  tests. Acceptance: store tests green, `python3 -m unittest` green.
+- **Phase C — detectors.** §4.1–4.4 incl. reboot wrapper + injection hooks,
+  freeze unit test, build test configs. Acceptance: freeze test green on
+  native_sim; xiao build test compiles with all detectors on.
+- **Phase D — RPC + web.** §8, §9 for source 0 (local logs), pagination,
+  status, delete, notifications on new local incident. Acceptance: RPC unit
+  tests + `cd web && npm ci && npm run generate && npm test && npm run lint
+  && npm run build` green.
+- **Phase E — split relay proxy.** §7 (`wdq`/`wdp`, responder, proxy,
+  relayed notifications), split build tests. Acceptance: relay unit tests +
+  both role builds green.
+- **Phase F — hardware validation.** §12 checklist on the rig; fix what
+  breaks; finalize README (user guide: west.yml snippet, Kconfig table,
+  web UI URL, conflict note about `k_sys_fatal_error_handler`).
+
+Every phase: run `python3 -m unittest` inside the nix devshell
+(`nix --extra-experimental-features 'nix-command flakes' develop
+/home/ubuntu/zmk-workspace/nix --command bash -lc '…'`), commit at
+milestones, `SKIP=prettier,eslint,jest,web-build pre-commit run --all-files`
+(web hooks are broken in the devshell — run npm equivalents directly).
+Read `skills/zmk-module-dev/SKILL.md` in-repo and
+`/home/ubuntu/zmk-workspace/skills/develop-zmk-module/SKILL.md` before coding.
+
+## 14. Risks / open points (decide during implementation, don't redesign)
+
+- native_sim settings backend selection (file vs NVS+flash_sim) — copy
+  whatever zmk-feature-custom-settings' native_sim tests use.
+- Exact `boot_ordinal` bookkeeping (§6) — any scheme with ≤1 extra small
+  settings write per persisted incident is acceptable.
+- Feed-work starvation false positives if a user work item legitimately
+  blocks a queue > timeout (e.g. long flash erase in settings) — if hardware
+  validation shows this, raise the default timeout; do not add suppression
+  logic in v1.
+- `__noinit` may land in a RAM area the Adafruit UF2 bootloader scrubs —
+  hardware Phase F explicitly verifies survival across `sys_reboot`; if it
+  fails, switch to a devicetree `zephyr,retained-ram` region at top of SRAM
+  (API-compatible change confined to `watchdog_pending.c`).
