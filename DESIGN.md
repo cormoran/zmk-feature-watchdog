@@ -1,10 +1,13 @@
 # zmk-feature-watchdog — Design
 
-Status: **design complete, implementation not started.**
-This document is the source of truth for implementation. It is written to be
-self-contained: an implementing agent should be able to work from this file,
-the referenced source files, and the workspace skills, without re-doing the
-exploration that produced it.
+Status: **Phases A-E implemented** (store/pending/boot-hook, freeze/fatal
+detectors + reset-cause audit, local Studio RPC + web UI, split relay
+proxy — all with native_sim unit tests and build tests green). **Phase F
+(hardware validation) is intentionally not done** — this PC's XIAO
+nRF52840 rig is in use by another project; validate on real hardware
+before shipping. This document remains the source of truth for what was
+built and why; see §13 for phase-by-phase detail and §12 for the hardware
+validation checklist that Phase F should follow.
 
 ## 1. Goal
 
