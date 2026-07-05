@@ -6,16 +6,16 @@ import {
   ZMKCustomSubsystem,
   ZMKAppContext,
 } from "@cormoran/zmk-studio-react-hook";
-import { Request, Response } from "./proto/your-name/template/template";
+import { Request, Response } from "./proto/cormoran/watchdog/watchdog";
 
-export const SUBSYSTEM_IDENTIFIER = "your_name__template";
+export const SUBSYSTEM_IDENTIFIER = "cormoran__watchdog";
 
 function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>🔧 ZMK Module Template</h1>
-        <p>Custom Studio RPC Demo</p>
+        <h1>🐶 ZMK Watchdog</h1>
+        <p>Firmware Incident Log (Custom Studio RPC Demo)</p>
       </header>
 
       <ZMKConnection
@@ -57,7 +57,7 @@ function App() {
 
       <footer className="app-footer">
         <p>
-          <strong>Template Module</strong> - Customize this for your ZMK module
+          <strong>Watchdog Module</strong> - Firmware instability incident log
         </p>
       </footer>
     </div>
@@ -121,7 +121,7 @@ export function RPCTestSection() {
         <div className="warning-message">
           <p>
             ⚠️ Subsystem "{SUBSYSTEM_IDENTIFIER}" not found. Make sure your
-            firmware includes the template module.
+            firmware includes the watchdog module.
           </p>
         </div>
       </section>

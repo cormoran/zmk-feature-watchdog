@@ -1,10 +1,10 @@
-config ZMK_TEMPLATE_FEATURE
-    bool "Enable template feature"
+config ZMK_WATCHDOG_FEATURE
+    bool "Enable firmware watchdog incident logging"
 
-if ZMK_TEMPLATE_FEATURE
+if ZMK_WATCHDOG_FEATURE
 
-config ZMK_TEMPLATE_FEATURE_STUDIO_RPC
-    bool "Enable template feature custom Studio RPC"
+config ZMK_WATCHDOG_FEATURE_STUDIO_RPC
+    bool "Expose watchdog incident log via custom Studio RPC"
     depends on ZMK_STUDIO
 
 endif
