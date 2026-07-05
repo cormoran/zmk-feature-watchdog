@@ -289,7 +289,7 @@ static K_MUTEX_DEFINE(peripheral_response_notification_lock);
 static cormoran_watchdog_Notification peripheral_response_notification;
 
 static bool encode_watchdog_notification_payload(pb_ostream_t *stream, const pb_field_t *field,
-                                                  void *const *arg) {
+                                                 void *const *arg) {
     const cormoran_watchdog_Notification *notification =
         (const cormoran_watchdog_Notification *)*arg;
     return zmk_rpc_custom_subsystem_encode_response_payload(
@@ -348,7 +348,8 @@ static int on_watchdog_relay_response(const zmk_event_t *eh) {
          * (see the doc comment in watchdog_request_exec.c) -- stamp the
          * real source now that it is known, mirroring the top-level
          * PeripheralResponse.source convention. */
-        if (relay_resp.response.which_response_type == cormoran_watchdog_Response_incident_page_tag) {
+        if (relay_resp.response.which_response_type ==
+            cormoran_watchdog_Response_incident_page_tag) {
             cormoran_watchdog_IncidentPageResponse *page =
                 &pr->response.response_type.incident_page;
             for (size_t i = 0; i < page->incidents_count; i++) {

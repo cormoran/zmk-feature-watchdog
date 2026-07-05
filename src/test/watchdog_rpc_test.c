@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/init.h>
@@ -526,6 +527,115 @@ static int test_rpc_recording_stopped_status(void) {
     return zmk_watchdog_store_delete_all();
 }
 
+/*
+ * InjectFreeze-via-RPC test (requires CONFIG_ZMK_WATCHDOG_TEST_INJECTION,
+ * enabled in tests/studio/native_sim.conf). Mirrors tests/watchdog/'s
+ * src/test/watchdog_test.c::test_freeze_detect(), but drives the injection
+ * through the RPC handler (InjectTestRequest) instead of calling
+ * zmk_watchdog_inject_freeze() directly -- exercising the exact path a real
+ * Studio client would use (src/studio/watchdog_request_exec.c's
+ * handle_inject_test()).
+ */
+
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_FREEZE_DETECT) && IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+
+static volatile int rpc_inject_freeze_reboot_calls;
+
+static void rpc_inject_freeze_test_reboot_override(void) { rpc_inject_freeze_reboot_calls++; }
+
+static int test_rpc_inject_freeze(void) {
+    rpc_inject_freeze_reboot_calls = 0;
+    zmk_watchdog_reboot_set_override(rpc_inject_freeze_test_reboot_override);
+
+    cormoran_watchdog_Request req = cormoran_watchdog_Request_init_zero;
+    req.which_request_type = cormoran_watchdog_Request_inject_test_tag;
+    req.request_type.inject_test.kind = cormoran_watchdog_InjectTestKind_FREEZE_KIND;
+
+    cormoran_watchdog_Response resp;
+    if (!call_watchdog_rpc(&req, &resp)) {
+        return -EINVAL;
+    }
+
+    /* The RPC handler must respond with InjectAck *before* the freeze
+     * actually happens (zmk_watchdog_inject_freeze() only submits a
+     * k_work and returns immediately -- see DESIGN.md SS4.4). */
+    if (resp.which_response_type != cormoran_watchdog_Response_inject_ack_tag ||
+        resp.response_type.inject_ack.kind != cormoran_watchdog_InjectTestKind_FREEZE_KIND) {
+        LOG_ERR("expected InjectAck(FREEZE_KIND), got response type %d", resp.which_response_type);
+        return -EINVAL;
+    }
+    if (rpc_inject_freeze_reboot_calls != 0) {
+        LOG_ERR("reboot happened synchronously from the RPC call -- injection must be async");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: watchdog_rpc_inject_freeze_ack");
+
+    /* CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS is set small in
+     * tests/studio/native_sim.conf specifically so this sleep is short. */
+    k_sleep(K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS * 2));
+
+    /* See src/test/watchdog_test.c::test_freeze_detect() for why the
+     * "sysworkq" channel must be disarmed now, before restoring the real
+     * zmk_watchdog_reboot(): the injected freeze work never returns, so
+     * sysworkq stays permanently blocked and the channel would otherwise
+     * keep re-firing (and re-rebooting) forever. */
+    zmk_watchdog_freeze_disarm_sysworkq_channel_for_test();
+    zmk_watchdog_reboot_set_override(NULL);
+
+    if (rpc_inject_freeze_reboot_calls < 1) {
+        LOG_ERR("RPC-triggered freeze did not reboot within %dms",
+                CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS * 2);
+        return -EINVAL;
+    }
+
+    int ret = zmk_watchdog_pending_convert();
+    if (ret != 0) {
+        LOG_ERR("pending_convert after RPC-triggered freeze failed: %d", ret);
+        return -EINVAL;
+    }
+
+    if (zmk_watchdog_store_count() != 1) {
+        LOG_ERR("RPC-triggered freeze incident did not land in store (count=%u)",
+                zmk_watchdog_store_count());
+        return -EINVAL;
+    }
+
+    struct zmk_watchdog_incident_record rec;
+    ret = zmk_watchdog_store_get(0, &rec);
+    if (ret != 0 || rec.type != ZMK_WATCHDOG_INCIDENT_FREEZE ||
+        strcmp(rec.detail.freeze.queue_name, "sysworkq") != 0) {
+        LOG_ERR("RPC-triggered freeze incident record mismatch: ret=%d type=%d queue='%s'", ret,
+                rec.type, rec.detail.freeze.queue_name);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: watchdog_rpc_inject_freeze_recorded");
+
+    /* Same rationale as watchdog_test.c::test_freeze_detect(): sysworkq is
+     * permanently wedged from here on, so end the process now rather than
+     * letting the rest of the firmware hang trying to use it. This test
+     * therefore runs last (see watchdog_rpc_test_init() below). */
+    exit(0);
+}
+
+#endif /* CONFIG_ZMK_WATCHDOG_FREEZE_DETECT && CONFIG_ZMK_WATCHDOG_TEST_INJECTION */
+
+/*
+ * InjectTest-disabled-build error path: when CONFIG_ZMK_WATCHDOG_TEST_INJECTION
+ * is off, watchdog_request_exec_handle() must answer InjectTestRequest with
+ * the same ErrorResponse any other unsupported request kind gets (see the
+ * #else branch in src/studio/watchdog_request_exec.c's
+ * watchdog_request_exec_handle()) -- the proto tag stays wired up for a
+ * stable wire format, but the handler never actually calls
+ * zmk_watchdog_inject_freeze()/_fatal(). This test build always has
+ * CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y (see tests/studio/native_sim.conf), so
+ * that #else branch cannot be exercised at runtime here -- verified instead
+ * by inspection of the #if IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+ * guard in watchdog_request_exec.c, which is the only place InjectTestRequest
+ * is ever acted on.
+ */
+
 static int watchdog_rpc_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -551,6 +661,18 @@ static int watchdog_rpc_test_init(void) {
     if (ret < 0) {
         return ret;
     }
+
+    /*
+     * Runs last: test_rpc_inject_freeze() permanently wedges the system
+     * workqueue (see its own doc comment above), so nothing else can run
+     * afterwards.
+     */
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_FREEZE_DETECT) && IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+    ret = test_rpc_inject_freeze();
+    if (ret < 0) {
+        return ret;
+    }
+#endif
 
     return 0;
 }

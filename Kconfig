@@ -142,7 +142,41 @@ config ZMK_WATCHDOG_TEST_INJECTION
       Adds internal helpers that deliberately freeze a monitored work queue
       or trigger a kernel oops, for validating the freeze/fatal detectors
       end-to-end (native_sim tests, hardware bring-up). Never enable this in
-      a production build. No RPC is wired to these yet (see a later phase).
+      a production build.
+
+      Two ways to trigger them once enabled:
+        - Studio RPC (central / non-split boards): cormoran.watchdog's
+          InjectTestRequest, wired up in
+          src/studio/watchdog_request_exec.c.
+        - Boot-delay auto-trigger (split peripherals, which have no Studio
+          RPC of their own): CONFIG_ZMK_WATCHDOG_TEST_INJECT_FREEZE_AT_BOOT_MS /
+          CONFIG_ZMK_WATCHDOG_TEST_INJECT_FATAL_AT_BOOT_MS below.
+
+if ZMK_WATCHDOG_TEST_INJECTION
+
+config ZMK_WATCHDOG_TEST_INJECT_FREEZE_AT_BOOT_MS
+    int "Auto-trigger a freeze this many ms after boot (0 = disabled)"
+    default 0
+    help
+      When > 0, schedules zmk_watchdog_inject_freeze() via a k_work_delayable
+      this many ms after boot. Intended for split peripherals, which have no
+      Studio RPC to receive an on-demand InjectTestRequest -- flash a test
+      build with this set, power-cycle, and observe the freeze/reboot/
+      incident-recorded cycle without needing any host-side tooling. Leave 0
+      (the default) for boards that trigger injection via Studio RPC instead
+      (see CONFIG_ZMK_WATCHDOG_TEST_INJECTION's help).
+
+config ZMK_WATCHDOG_TEST_INJECT_FATAL_AT_BOOT_MS
+    int "Auto-trigger a fatal error this many ms after boot (0 = disabled)"
+    default 0
+    help
+      Same as CONFIG_ZMK_WATCHDOG_TEST_INJECT_FREEZE_AT_BOOT_MS, but calls
+      zmk_watchdog_inject_fatal() (k_oops()) instead. If both this and
+      CONFIG_ZMK_WATCHDOG_TEST_INJECT_FREEZE_AT_BOOT_MS are set, whichever
+      fires first reboots the device before the other's timer elapses --
+      only set one at a time in practice.
+
+endif # ZMK_WATCHDOG_TEST_INJECTION
 
 config ZMK_WATCHDOG_TEST
     bool "Enable watchdog self-test (native_sim only)"

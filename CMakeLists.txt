@@ -14,6 +14,7 @@ if(CONFIG_ZMK_WATCHDOG)
 
     if(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
         target_sources(app PRIVATE src/watchdog_inject.c)
+        target_sources(app PRIVATE src/watchdog_inject_autotrigger.c)
     endif()
 
     if(CONFIG_ZMK_WATCHDOG_TEST)

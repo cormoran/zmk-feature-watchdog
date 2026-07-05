@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include <zephyr/sys/util.h>
+
 #include <cormoran/watchdog/watchdog.pb.h>
 #include <cormoran/zmk/watchdog.h>
 #include <cormoran/zmk/watchdog_request_exec.h>
@@ -148,6 +150,43 @@ static void handle_delete_incidents(const cormoran_watchdog_DeleteIncidentsReque
     resp->response_type.delete_result = result;
 }
 
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+/*
+ * Dangerous by design -- only compiled in when CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y
+ * (default n). See DESIGN.md SS4.4 and src/watchdog_inject.c.
+ *
+ *  - FREEZE_KIND: zmk_watchdog_inject_freeze() only submits a k_work to the
+ *    system workqueue and returns immediately -- the actual freeze (and the
+ *    eventual reboot once CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS elapses)
+ *    happens asynchronously, well after this function returns and the
+ *    InjectAckResponse below has been handed back to the RPC transport. Safe
+ *    to call from the RPC handler's own thread context.
+ *  - FATAL_KIND: zmk_watchdog_inject_fatal() calls k_oops() synchronously, in
+ *    this same call stack -- it does not return, and the device reboots
+ *    almost immediately. The InjectAckResponse this function fills in is
+ *    typically never actually encoded/sent: the fatal-error handler's own
+ *    zmk_watchdog_reboot() call happens first. That is expected, not a bug
+ *    (see the proto doc comment on InjectTestRequest).
+ */
+static void handle_inject_test(const cormoran_watchdog_InjectTestRequest *req,
+                               cormoran_watchdog_Response *resp) {
+    switch (req->kind) {
+    case cormoran_watchdog_InjectTestKind_FATAL_KIND:
+        zmk_watchdog_inject_fatal();
+        break;
+    case cormoran_watchdog_InjectTestKind_FREEZE_KIND:
+    default:
+        zmk_watchdog_inject_freeze();
+        break;
+    }
+
+    cormoran_watchdog_InjectAckResponse ack = cormoran_watchdog_InjectAckResponse_init_zero;
+    ack.kind = req->kind;
+    resp->which_response_type = cormoran_watchdog_Response_inject_ack_tag;
+    resp->response_type.inject_ack = ack;
+}
+#endif /* CONFIG_ZMK_WATCHDOG_TEST_INJECTION */
+
 void watchdog_request_exec_handle(const cormoran_watchdog_Request *req,
                                   cormoran_watchdog_Response *resp) {
     *resp = (cormoran_watchdog_Response)cormoran_watchdog_Response_init_zero;
@@ -161,6 +200,18 @@ void watchdog_request_exec_handle(const cormoran_watchdog_Request *req,
         break;
     case cormoran_watchdog_Request_delete_incidents_tag:
         handle_delete_incidents(&req->request_type.delete_incidents, resp);
+        break;
+    case cormoran_watchdog_Request_inject_test_tag:
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+        handle_inject_test(&req->request_type.inject_test, resp);
+#else
+        /* The proto tag exists unconditionally for a stable wire format
+         * (DESIGN.md SS4.4), but a non-test-injection build must never
+         * actually freeze/fault itself just because a client asked --
+         * answer with the same error a genuinely unsupported request kind
+         * would get. */
+        set_error(resp, "Unsupported or missing watchdog request");
+#endif
         break;
     default:
         set_error(resp, "Unsupported or missing watchdog request");

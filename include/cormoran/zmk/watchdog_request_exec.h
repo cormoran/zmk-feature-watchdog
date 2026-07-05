@@ -37,16 +37,26 @@ void watchdog_incident_record_to_proto(uint16_t id, uint32_t source,
                                        const struct zmk_watchdog_incident_record *rec,
                                        cormoran_watchdog_Incident *out);
 
-/** @brief Executes `req` (one of GetStatus/ListIncidents/DeleteIncidents)
- * against this half's own local store and fills `resp`. `req->source` (or
- * the equivalent field per request kind) is ignored here -- the caller is
- * responsible for routing a nonzero source to the relay instead of calling
- * this function directly (see watchdog_relay_dispatch_request()).
+/** @brief Executes `req` (one of GetStatus/ListIncidents/DeleteIncidents/
+ * InjectTest) against this half's own local store and fills `resp`.
+ * `req->source` (or the equivalent field per request kind) is ignored here --
+ * the caller is responsible for routing a nonzero source to the relay
+ * instead of calling this function directly (see
+ * watchdog_relay_dispatch_request()). InjectTest has no `source` field at
+ * all -- test/fault injection only ever targets *this* half, by design (see
+ * DESIGN.md SS4.4): a peripheral has no Studio RPC of its own to receive an
+ * on-demand injection request, so it uses the boot-delay auto-trigger
+ * instead (src/watchdog_inject_autotrigger.c).
  *
- * Always fills *resp with something (a Status/IncidentPage/DeleteResult on
- * success, an ErrorResponse for an unset/unsupported request kind) -- never
- * returns without a usable response, matching this module's "never crash on
- * a bad request" style.
+ * InjectTestRequest is only honored when CONFIG_ZMK_WATCHDOG_TEST_INJECTION
+ * is enabled; otherwise it falls through to the same ErrorResponse path as
+ * any other unsupported request kind, so the proto wire format stays stable
+ * across test-injection-enabled and disabled builds.
+ *
+ * Always fills *resp with something (a Status/IncidentPage/DeleteResult/
+ * InjectAck on success, an ErrorResponse for an unset/unsupported request
+ * kind) -- never returns without a usable response, matching this module's
+ * "never crash on a bad request" style.
  */
 void watchdog_request_exec_handle(const cormoran_watchdog_Request *req,
                                   cormoran_watchdog_Response *resp);

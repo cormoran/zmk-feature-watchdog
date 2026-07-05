@@ -98,10 +98,38 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y",
                         "CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y",
                         "CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y",
+                        # Test injection is dangerous and must default off,
+                        # even on a build that otherwise enables every other
+                        # detector.
+                        NotFound("CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y"),
                     ],
                     device=[
                         "DT_COMPAT_HAS_OKAY_nordic_nrf_wdt",
                     ],
+                ),
+                # Dedicated test-injection build (DESIGN.md SS4.4/SS12): the
+                # only artifact with CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y,
+                # proving the InjectTest RPC wiring
+                # (src/studio/watchdog_request_exec.c) compiles for a real
+                # board, not just native_sim.
+                "module_watchdog_board_test_injection": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_WATCHDOG=y",
+                        "CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y",
+                        "CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y",
+                        "CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y",
+                        "CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y",
+                        # Boot-delay auto-trigger Kconfig options exist but
+                        # default to 0 (disabled) even on this artifact -- see
+                        # the build.yaml comment for why they aren't baked
+                        # into a standing build-test artifact. (Int Kconfigs
+                        # always render with their value in .config, never
+                        # "is not set" -- unlike bool/tristate.)
+                        "CONFIG_ZMK_WATCHDOG_TEST_INJECT_FREEZE_AT_BOOT_MS=0",
+                        "CONFIG_ZMK_WATCHDOG_TEST_INJECT_FATAL_AT_BOOT_MS=0",
+                    ],
+                    device=[],
                 ),
                 "custom_settings_board": ConfigAndDeviceTree(
                     config=[

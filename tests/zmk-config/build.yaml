@@ -17,6 +17,23 @@ include:
     shield: tester_xiao
     cmake-args: -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
 
+  # Dedicated test-injection build (DESIGN.md SS4.4/SS12): proves
+  # CONFIG_ZMK_WATCHDOG_TEST_INJECTION (+ its RPC wiring in
+  # src/studio/watchdog_request_exec.c) compiles for a real board target, not
+  # just native_sim -- kept as its own artifact rather than enabling
+  # TEST_INJECTION on module_watchdog_board_with_rpc, since it is dangerous
+  # and must stay off in every "normal" build/artifact by default. Not
+  # combined with the boot-delay auto-trigger Kconfig options (those are
+  # meant to be set ad hoc for one hardware-validation flash, not baked into
+  # a standing build-test artifact).
+  - artifact: module_watchdog_board_test_injection
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512: see the module_watchdog_board_with_rpc
+    # comment above.
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y -DCONFIG_ZMK_WATCHDOG_TEST_INJECTION=y -DCONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
+    snippet: studio-rpc-usb-uart
+
   - artifact: custom_settings_board
     board: xiao_ble//zmk
     shield: tester_xiao

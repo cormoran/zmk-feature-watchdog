@@ -66,11 +66,37 @@ message DeleteIncidentsRequest {
     uint32 source = 3;
 }
 
+// Which detector to exercise. Mirrors zmk_watchdog_inject_freeze()/
+// zmk_watchdog_inject_fatal() (include/cormoran/zmk/watchdog.h). Only
+// honored when the firmware was built with
+// CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y -- otherwise InjectTestRequest is
+// answered with an ErrorResponse, same as any other unsupported request (see
+// DESIGN.md SS4.4).
+enum InjectTestKind {
+    FREEZE_KIND = 0;
+    FATAL_KIND = 1;
+}
+
+// Deliberately triggers the freeze or fatal detector, for hardware
+// validation (DESIGN.md SS4.4/SS12). Dangerous: only wired up when
+// CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y.
+//   - kind=FREEZE_KIND: zmk_watchdog_inject_freeze() submits a k_work to the
+//     system workqueue and returns immediately -- the actual freeze (and
+//     eventual reboot) happens asynchronously, well after this request's
+//     InjectAckResponse has already been sent.
+//   - kind=FATAL_KIND: zmk_watchdog_inject_fatal() calls k_oops() synchronously
+//     in the handler's own call stack. The device reboots before the
+//     firmware gets a chance to send any response at all -- the caller
+//     should not expect an InjectAckResponse (or any response) for this one;
+//     that is expected, not a bug.
+message InjectTestRequest { InjectTestKind kind = 1; }
+
 message Request {
     oneof request_type {
         GetStatusRequest get_status = 1;
         ListIncidentsRequest list_incidents = 2;
         DeleteIncidentsRequest delete_incidents = 3;
+        InjectTestRequest inject_test = 4;
     }
 }
 
@@ -96,6 +122,12 @@ message IncidentPageResponse {
 
 message DeleteResultResponse { uint32 deleted = 1; }
 
+// Acknowledges an InjectTestRequest was received and (for FREEZE_KIND) the
+// async injection work was submitted. See InjectTestRequest's doc comment
+// above for why FATAL_KIND requests typically never get this far as an
+// actual wire response.
+message InjectAckResponse { InjectTestKind kind = 1; }
+
 // Returned immediately in place of the real response when a request's
 // `source` targets a split peripheral (relaying over
 // CONFIG_ZMK_SPLIT_RELAY_EVENT is inherently asynchronous -- it cannot fit
@@ -111,6 +143,7 @@ message Response {
         IncidentPageResponse incident_page = 3;
         DeleteResultResponse delete_result = 4;
         DeferredResponse deferred = 5;
+        InjectAckResponse inject_ack = 6;
     }
 }
 

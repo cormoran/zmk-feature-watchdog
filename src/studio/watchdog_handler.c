@@ -183,7 +183,10 @@ static void set_error(cormoran_watchdog_Response *resp, const char *message) {
 
 /* Returns the `source` field of a GetStatus/ListIncidents/DeleteIncidents
  * request (0 if the request kind is unset/unsupported -- routed to the
- * local executor, which will itself produce an ErrorResponse). */
+ * local executor, which will itself produce an ErrorResponse). InjectTest
+ * has no `source` field and always falls into the default case: test/fault
+ * injection only ever targets this half (see DESIGN.md SS4.4), so it is
+ * always executed locally, never relayed to a split peripheral. */
 static uint32_t request_source(const cormoran_watchdog_Request *req) {
     switch (req->which_request_type) {
     case cormoran_watchdog_Request_get_status_tag:
