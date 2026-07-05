@@ -2,7 +2,7 @@ name: Test and Build Web UI
 
 on:
   push:
-    branches: ["main+custom-studio-protocol"]
+    branches: ["main"]
     paths:
       - "web/**"
       - ".github/workflows/web-ui.yml"
