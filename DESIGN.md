@@ -254,6 +254,90 @@ UI shows "no response" after timeout. Document as v1 limitation.
 Central's own logs are answered **synchronously** in the RPC response
 (paginated, §8) — no relay involved for source 0.
 
+### 7.1 Relay wire format: stream one incident per event (keep DATA_LEN small)
+
+**Verified 2026-07-05 by reading the fork's actual relay transport**
+(`app/include/zmk/split/transport/types.h`,
+`app/src/split/bluetooth/relay_event.h`): a relay event is a small
+fixed-size datagram — `relay_event_header.event_data_size` is a `uint8_t`,
+so no relay event can ever exceed 255 bytes, and the whole nanopb-encoded
+payload must be materialized in one static buffer before the event is
+raised (no streaming is possible *within* one relay event; this is a
+one-shot small-datagram transport, unlike §7.2's Studio RPC transport).
+
+Consequently: **do not embed a whole paginated `IncidentPageResponse`
+(multiple incidents) inside one relay event.** That forces
+`CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` up from its default 128 (an
+earlier revision of this design needed 240 for a 3-incident page + relay
+envelope). Instead, stream the peripheral's `ListIncidents` answer as
+**one relay event per incident**, keeping every relay event's payload
+close to "one `Incident` + envelope" regardless of page size:
+
+- Add a relay-only `RelayIncidentChunk { bool done; uint32 total;
+  uint32 start_index; Incident incident; }` message. `RelayResponse`
+  becomes a oneof: `Response response` (unchanged, used as-is for
+  GetStatus/DeleteIncidents/InjectTest/Error — already small, single
+  event) or `RelayIncidentChunk incident_chunk` (ListIncidents only).
+- Peripheral responder: for a `ListIncidents` request, still call
+  `watchdog_request_exec_handle()` exactly as today (unchanged — it
+  builds a normal `Response{incident_page:{...}}` using the *local*
+  page size), then **iterate that in-RAM result** and raise one
+  `RelayResponse{incident_chunk:{done:false, incident:incidents[i], ...}}`
+  event per incident, followed by one final
+  `{done:true, total, start_index}` event with no incident. For every
+  other request type, raise a single `RelayResponse{response:...}` event
+  exactly as before — no change.
+- Central dispatcher: unchanged for non-list responses (wrap+raise a
+  `PeripheralResponse` Studio notification immediately, as today). For
+  `incident_chunk` events, accumulate incidents into a small static
+  array (bounded by the same local page-size cap the peripheral used —
+  trivial RAM, one page's worth) keyed by the in-flight `request_id`;
+  on `done:true`, build the **same** `PeripheralResponse{response:
+  {incident_page:{incidents, total, start_index}}}` Studio notification
+  the web UI already expects and raise it once. **The public
+  Notification/Response proto and the web UI do not change at all** —
+  only the private peripheral↔central wire format (`RelayRequest`/
+  `RelayResponse`, already documented as "never sent directly over the
+  Studio RPC transport") is restructured.
+- Net effect: `CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN` can stay at its
+  framework default (128); the local (source 0) `ListIncidents` page size
+  is now decoupled from both DATA_LEN and TX_BUF_SIZE (§7.2) and can be
+  chosen purely for UX (this doc's original sketch's "≤4" is fine again).
+
+## 7.2 Studio RPC TX buffer: genuinely streaming, do not scale with response size
+
+**Verified 2026-07-05 by reading the fork's actual RPC transport**
+(`app/src/studio/rpc.c`'s `send_response`/`rpc_tx_buffer_write`, and both
+`uart_rpc_transport.c`'s and `gatt_rpc_transport.c`'s `tx_notify`): unlike
+the relay transport above, `CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE` backs a
+**ring buffer**, not a "whole response must fit here" buffer.
+`pb_ostream_for_tx_buf()` gives nanopb's `pb_encode()` a callback-based
+`pb_ostream_t` (`max_size = SIZE_MAX`) whose write callback
+(`rpc_tx_buffer_write`) claims ring-buffer space, writes what fits, calls
+the transport's `tx_notify` to drain toward the wire (UART: enables TX
+IRQ or polls out bytes once half-full/done; BLE: queues a GATT
+indication and re-arms on each `indicate_cb`), and if the ring buffer is
+momentarily full it just `k_sleep(K_MSEC(1))` and retries — it never
+gives up or truncates. The custom-subsystem response field
+(`zmk_custom_CallResponse.payload`) is itself a nanopb callback field;
+per `zmk/studio/custom.h`'s own doc comment, nanopb invokes our encode
+callback in **two passes** (a counting pass into an internal sizing
+stream that discards bytes, then a real pass through the same streaming
+ring-buffer chain above) — neither pass ever needs the whole encoded
+response to exist in one buffer.
+
+Consequently: **`CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE` does not need to be
+raised to fit a full `IncidentPageResponse`** (an earlier revision of
+this design set it to 512 with a `BUILD_ASSERT(encoded_max + 64 <=
+TX_BUF_SIZE)` — both were unnecessary caution copied from a general
+pitfall note that does not apply to this exact streaming mechanism).
+Leave it at the framework default (64) unless hardware validation (§12)
+finds a concrete problem; drop the response-size `BUILD_ASSERT` entirely.
+This is unrelated to §7.1's relay `DATA_LEN` fix — the relay transport
+(one-shot small datagram) and the Studio RPC transport (streaming ring
+buffer) have fundamentally different size constraints and must not be
+confused with each other.
+
 ## 8. Studio RPC + proto
 
 Subsystem identifier: `cormoran__watchdog` (created by the template's
