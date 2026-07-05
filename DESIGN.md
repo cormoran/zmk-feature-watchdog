@@ -1,13 +1,16 @@
 # zmk-feature-watchdog — Design
 
-Status: **Phases A-E implemented** (store/pending/boot-hook, freeze/fatal
-detectors + reset-cause audit, local Studio RPC + web UI, split relay
-proxy — all with native_sim unit tests and build tests green). **Phase F
-(hardware validation) is intentionally not done** — this PC's XIAO
-nRF52840 rig is in use by another project; validate on real hardware
-before shipping. This document remains the source of truth for what was
-built and why; see §13 for phase-by-phase detail and §12 for the hardware
-validation checklist that Phase F should follow.
+Status: **Phases A-E implemented and unit/build tested; Phase F (hardware
+validation) partially done.** Single-board hardware validation
+(freeze/fatal detection, retained-RAM crash-crossing, flash-wear cap,
+delete/resume, RPC pagination) is **complete and green** — see §12.1 for
+full results. Split-relay hardware validation (2 boards) was attempted but
+**not completed**: a second board on this rig hit a real, pre-existing
+hardware/boot-stability issue unrelated to this module's code (§12.1
+has details and a recommendation for whoever resumes it). This document
+remains the source of truth for what was built and why; see §13 for
+phase-by-phase detail and §12/§12.1 for the hardware validation checklist
+and results.
 
 ## 1. Goal
 
@@ -470,9 +473,96 @@ JLinkExe `savebin`, RTT control-block zeroing before reflash,
 7. Web UI smoke test if a browser is available; otherwise the pyusb CLI
    (`tools/zmk-studio-rpc custom-call`) covers the RPC surface.
 
-Split relay on real hardware is **out of scope for this rig** (one board);
-covered by native_sim/relay unit tests + split build tests. Note this in the
-final report.
+Split relay on real hardware was attempted once this rig grew a second board
+(see §12.1) but was not completed; native_sim/relay unit tests + split build
+tests remain the primary evidence for that path.
+
+### 12.1 Hardware validation results (2026-07-05)
+
+**Single board (XIAO nRF52840 "Module Test", J-Link `1050398082`, flash-offset-0
+workaround) — thoroughly validated, all green:**
+
+- Flashed `module_watchdog_board_test_injection`
+  (`CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y`, Studio RPC on). Confirmed via
+  Studio RPC (`core.get_device_info`, `custom.list_custom_subsystems` →
+  `cormoran__watchdog`).
+- `InjectTestRequest{FREEZE_KIND}` → device stopped responding, rebooted
+  after the 5 s timeout, re-enumerated; `ListIncidents` showed a `FREEZE`
+  incident with `queue_name: "sysworkq"` — proves the task_wdt channel,
+  retained-RAM pending slot, and boot-time conversion all work correctly
+  end-to-end on real hardware.
+- `InjectTestRequest{FATAL_KIND}` → request itself failed with a USB pipe
+  error (expected: `k_oops()` runs synchronously in the RPC handler's own
+  call stack, so the device faults before a response can be sent) →
+  reboot → `FATAL` incident recorded with `reason: 3` (exactly
+  `K_ERR_KERNEL_OOPS`, matching `k_oops()`) and plausible `pc`/`lr` values.
+  Repeated 6 times total across the session; reason/pc/lr were identical
+  every time (deterministic fault site), as expected.
+- Filled the store to `capacity` (16) via 13 more `FATAL_KIND` injections;
+  `GetStatus` correctly showed `recording_stopped: true` at exactly 16
+  stored. One further injection was **dropped** (`stored` stayed 16,
+  `dropped_since_boot` incremented to 1, no flash write) — proves the
+  flash-wear cap works exactly as designed.
+- `DeleteIncidents{all: true}` → `stored: 0`, `recording_stopped` cleared
+  — recording resumed correctly.
+- `ListIncidents` pagination verified with 5 stored incidents: page 0
+  returned exactly 4 (`WATCHDOG_RPC_PAGE_SIZE`), page 1 (`start_index: 4`)
+  returned the remaining 1 with `total: 5` — matches native_sim coverage.
+- **Reset-cause audit also engaged unprompted** during this session — a
+  `RESET_CAUSE` incident with `cause_bits: 18` (`RESET_WATCHDOG |
+  RESET_SOFTWARE`) appeared once, most likely from one of several manual
+  `JLinkExe` SWD resets performed while investigating tooling issues (see
+  below) rather than from the module's own detectors, but it confirms the
+  degraded fallback path (§4.3) does fire correctly and does not crash or
+  duplicate when it does.
+- **Tooling finding, not a firmware bug**: after a *software*-triggered
+  reboot (`sys_reboot()`, or an equivalent JLink `r`/`AIRCR.SYSRESETREQ`
+  reset), this sandbox's host-side USB hotplug sync sometimes fails to
+  create the `/dev/zmk-hp-zmk-tty-*` symlink for the new enumeration (the
+  underlying kernel `ttyACM*` device and its sysfs `cdc_acm` binding exist
+  fine — confirmed via `/sys/bus/usb/devices/.../tty/ttyACMN` — but no
+  `/dev` node appears, even after `udevadm settle`, for minutes). The
+  existing `docs/zmk-studio-rpc.md` pyusb transport
+  (`--transport pyusb`) bypasses this entirely (talks to the CDC bulk
+  endpoints directly via libusb, no OS tty node needed) and was used for
+  the rest of this session once discovered. Worth folding into
+  `skills/debug-zmk-jlink` as a documented workaround for post-*software*-
+  reboot (as opposed to post-*flash*) enumeration flakiness.
+
+**Split (2 boards) — attempted, blocked by a hardware issue on the second
+board, not completed:**
+
+Built `module_watchdog_split_peripheral` (Module Test board) and
+`module_watchdog_split_central` (Abyss Tester XIAO, J-Link `1057792823`, no
+flash-offset workaround needed) per `skills/debug-zmk-split`. The
+peripheral flashed and ran correctly (confirmed stable USB re-enumeration,
+no crash). **The central board failed to boot past very early
+initialization**: `JLinkExe`/GDB backtraces repeatedly caught it inside
+`lfclk_spinwait()` (`drivers/clock_control/clock_control_nrf.c`) — a
+busy-wait for the external 32.768 kHz crystal (LFXO, this board's default
+`CONFIG_CLOCK_CONTROL_NRF_K32SRC_XTAL=y`) to report stable, which never
+happened. Trying `CONFIG_CLOCK_CONTROL_NRF_K32SRC_RC=y` (internal RC
+oscillator) as a diagnostic did not help. **The user physically
+power-cycled this board mid-session**, after which the clock issue
+resolved (subsequent GDB backtraces showed genuine, deep BLE controller
+activity — real HCI command processing via the ticker/mayfly scheduler,
+not a hang) — consistent with this being a marginal crystal
+startup/hardware condition on this specific unit rather than a firmware
+bug (nothing in this module touches clock configuration). However, even
+after the power cycle, this board's USB never enumerated (confirmed via
+raw `lsusb`, not just the `/dev` symlink layer) and its RTT log buffer's
+write offset stayed at 0 despite ~90 s of additional waiting, so Studio
+RPC access to it was never established this session. Given the
+substantial hardware time already spent and that this points to a
+rig/hardware condition independent of the watchdog module's own code, hardware
+split validation was stopped here rather than pursued further; the
+peripheral was left flashed with a clean, non-looping build
+(`module_watchdog_split_peripheral`, no test-injection auto-trigger) so
+the rig is in a good state for a future session. **Recommendation for
+whoever picks this up**: start with a fresh physical power cycle of the
+Abyss Tester XIAO board before flashing anything, and confirm plain
+`core.get_device_info` over Studio RPC works *before* layering the
+watchdog-specific relay checks on top.
 
 ## 13. Implementation phases (each = one subagent task)
 
@@ -500,9 +590,12 @@ intentionally still points at the upstream template.
 - **Phase E — split relay proxy.** §7 (`wdq`/`wdp`, responder, proxy,
   relayed notifications), split build tests. Acceptance: relay unit tests +
   both role builds green.
-- **Phase F — hardware validation.** §12 checklist on the rig; fix what
-  breaks; finalize README (user guide: west.yml snippet, Kconfig table,
-  web UI URL, conflict note about `k_sys_fatal_error_handler`).
+- **Phase F — hardware validation.** §12 checklist on the rig. **Status:
+  single-board portion done and green (§12.1); split-relay portion
+  attempted but blocked by a hardware issue on the second board (§12.1) —
+  resume with the recommendation there.** README already reflects the
+  user guide content from earlier phases; revisit once split hardware
+  validation actually completes.
 
 Every phase: run `python3 -m unittest` inside the nix devshell
 (`nix --extra-experimental-features 'nix-command flakes' develop
