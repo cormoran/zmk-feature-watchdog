@@ -5,9 +5,11 @@
  */
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <zephyr/init.h>
+#include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/util.h>
@@ -64,7 +66,7 @@ static int test_settings_load(struct settings_store *cs, const struct settings_l
             continue;
         }
         int ret = settings_call_set_handler(record->name, record->len, test_settings_read_cb,
-                                             record, arg);
+                                            record, arg);
         if (ret < 0 && first_error == 0) {
             first_error = ret;
         }
@@ -73,7 +75,7 @@ static int test_settings_load(struct settings_store *cs, const struct settings_l
 }
 
 static int test_settings_save(struct settings_store *cs, const char *name, const char *value,
-                               size_t val_len) {
+                              size_t val_len) {
     ARG_UNUSED(cs);
 
     struct test_settings_record *record = test_settings_find_record(name);
@@ -372,6 +374,199 @@ static int test_pending_convert_bad_crc(void) {
     return 0;
 }
 
+/* --------------------------------------------------------------------
+ * Freeze detector test (requires CONFIG_ZMK_WATCHDOG_FREEZE_DETECT +
+ * CONFIG_ZMK_WATCHDOG_TEST_INJECTION).
+ *
+ * zmk_watchdog_inject_freeze() blocks the system workqueue forever; this
+ * starves the "sysworkq" task_wdt feed work (also submitted to the system
+ * workqueue), so once CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS elapses the
+ * channel's ISR callback fires, records a FREEZE incident into the pending
+ * slot, and calls zmk_watchdog_reboot() -- intercepted here via
+ * zmk_watchdog_reboot_set_override() so the test process doesn't actually
+ * reboot/exit.
+ * -------------------------------------------------------------------- */
+
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_FREEZE_DETECT) && IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+
+static volatile int freeze_reboot_calls;
+
+static void freeze_test_reboot_override(void) { freeze_reboot_calls++; }
+
+static int test_freeze_detect(void) {
+    freeze_reboot_calls = 0;
+    zmk_watchdog_reboot_set_override(freeze_test_reboot_override);
+
+    zmk_watchdog_inject_freeze();
+
+    /* CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS is set small in
+     * tests/watchdog/native_sim.conf specifically so this sleep is short.
+     * Sleep comfortably past the timeout to give the task_wdt channel time
+     * to fire. */
+    k_sleep(K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS * 2));
+
+    /*
+     * The injected freeze work never returns, so sysworkq stays permanently
+     * blocked for the rest of this process's life -- but the "sysworkq"
+     * task_wdt channel itself would otherwise keep re-firing every
+     * CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS forever (task_wdt re-arms its
+     * internal timer on every fire). Disarm that channel now that we've
+     * observed one firing, *before* restoring the real zmk_watchdog_reboot():
+     * without this, a later firing would call the real sys_reboot(), which
+     * on native_sim exits the whole test process (verified in practice --
+     * this is also why this test runs last, see watchdog_test_init()). A
+     * disarmed channel is also realistic: on real hardware the "reboot"
+     * this simulates would be an actual device reset, so there would be no
+     * "next firing" to worry about either.
+     */
+    zmk_watchdog_freeze_disarm_sysworkq_channel_for_test();
+    zmk_watchdog_reboot_set_override(NULL);
+
+    if (freeze_reboot_calls < 1) {
+        LOG_ERR("freeze detector did not trigger a reboot within %dms",
+                CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS * 2);
+        return -EINVAL;
+    }
+
+    int ret = zmk_watchdog_pending_convert();
+    if (ret != 0) {
+        LOG_ERR("pending_convert after freeze failed: %d", ret);
+        return -EINVAL;
+    }
+
+    if (zmk_watchdog_store_count() != 1) {
+        LOG_ERR("freeze incident did not land in store (count=%u)", zmk_watchdog_store_count());
+        return -EINVAL;
+    }
+
+    struct zmk_watchdog_incident_record rec;
+    ret = zmk_watchdog_store_get(0, &rec);
+    if (ret != 0 || rec.type != ZMK_WATCHDOG_INCIDENT_FREEZE ||
+        strcmp(rec.detail.freeze.queue_name, "sysworkq") != 0) {
+        LOG_ERR("freeze incident record mismatch: ret=%d type=%d queue='%s'", ret, rec.type,
+                rec.detail.freeze.queue_name);
+        return -EINVAL;
+    }
+
+    (void)zmk_watchdog_store_delete_all();
+    LOG_INF("PASS: watchdog_freeze_detect");
+
+    /*
+     * This test permanently and deliberately wedges sysworkq (see the big
+     * comment above) -- that is the whole point (it's what makes the
+     * task_wdt channel fire), but it also means the rest of the firmware
+     * can never boot normally afterwards: among other things, the kscan
+     * mock driver schedules its own events on sysworkq too and would never
+     * fire, hanging this test binary forever instead of exiting (verified
+     * in practice). On real hardware this moment is where the *real*
+     * zmk_watchdog_reboot() would already have restarted the device; here,
+     * ending the process the same way main()'s kscan-driven exit-after
+     * would have is the accurate way to represent that outcome so
+     * run-test.sh's harness (which only inspects piped stdout, not this
+     * process's exit code) sees the PASS line and terminates cleanly.
+     */
+    exit(0);
+}
+
+#endif /* CONFIG_ZMK_WATCHDOG_FREEZE_DETECT && CONFIG_ZMK_WATCHDOG_TEST_INJECTION */
+
+/* --------------------------------------------------------------------
+ * Fatal detector test (requires CONFIG_ZMK_WATCHDOG_FATAL_DETECT).
+ *
+ * Rather than actually faulting native_sim -- unsafe/unreliable: verified
+ * in practice that routing a real k_oops()/z_fatal_error() through this
+ * test process causes zephyr/kernel/fatal.c to k_thread_abort() the
+ * faulting thread once k_sys_fatal_error_handler() returns (since our
+ * reboot override doesn't tear anything down), which either takes the
+ * whole process down (if that thread is the test-driver/init thread) or
+ * leaves the test's control flow in an unclear state (run from a disposable
+ * thread) -- this exercises the two safe layers directly instead:
+ *
+ *  1. watchdog_fatal_build_record(): the record-building logic, factored
+ *     out specifically so it can be called with a synthetic reason/esf.
+ *  2. k_sys_fatal_error_handler() *itself*, called as a plain function
+ *     (not via a real fault): this is exactly what the real fault path
+ *     would invoke, just without going through z_fatal_error()'s
+ *     surrounding thread-abort machinery, which is what makes it unsafe to
+ *     trigger for real inside a test process.
+ * -------------------------------------------------------------------- */
+
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_FATAL_DETECT)
+
+static int test_fatal_build_record(void) {
+    struct zmk_watchdog_incident_record rec;
+    watchdog_fatal_build_record(&rec, 3 /* K_ERR_KERNEL_PANIC */, NULL);
+
+    if (rec.type != ZMK_WATCHDOG_INCIDENT_FATAL || rec.detail.fatal.reason != 3) {
+        LOG_ERR("fatal record builder mismatch: type=%d reason=%u", rec.type,
+                rec.detail.fatal.reason);
+        return -EINVAL;
+    }
+    /* esf == NULL -> pc/lr stay 0 (documented behavior). */
+    if (rec.detail.fatal.pc != 0 || rec.detail.fatal.lr != 0) {
+        LOG_ERR("fatal record builder should zero pc/lr for a NULL esf");
+        return -EINVAL;
+    }
+    if (rec.detail.fatal.thread_name[0] == '\0') {
+        LOG_ERR("fatal record builder left thread_name empty");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: watchdog_fatal_build_record");
+    return 0;
+}
+
+static volatile int fatal_reboot_calls;
+
+static void fatal_test_reboot_override(void) { fatal_reboot_calls++; }
+
+/* Declared in fatal.c but not part of the public header (it's the weak
+ * symbol override itself, not a stable API) -- redeclare its exact
+ * prototype here to call it directly as an ordinary function. */
+void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf);
+
+static int test_fatal_handler_end_to_end(void) {
+    fatal_reboot_calls = 0;
+    zmk_watchdog_reboot_set_override(fatal_test_reboot_override);
+
+    /* Calls the real override directly (not via z_fatal_error(), which
+     * would also try to abort the calling thread afterwards -- see the
+     * file comment above for why that's unsafe to exercise for real here).
+     * esf = NULL exactly like a native_sim k_oops() would deliver. */
+    k_sys_fatal_error_handler(3 /* K_ERR_KERNEL_OOPS */, NULL);
+
+    zmk_watchdog_reboot_set_override(NULL);
+
+    if (fatal_reboot_calls < 1) {
+        LOG_ERR("fatal handler did not trigger a reboot");
+        return -EINVAL;
+    }
+
+    int ret = zmk_watchdog_pending_convert();
+    if (ret != 0) {
+        LOG_ERR("pending_convert after fatal handler failed: %d", ret);
+        return -EINVAL;
+    }
+
+    if (zmk_watchdog_store_count() != 1) {
+        LOG_ERR("fatal incident did not land in store (count=%u)", zmk_watchdog_store_count());
+        return -EINVAL;
+    }
+
+    struct zmk_watchdog_incident_record rec;
+    ret = zmk_watchdog_store_get(0, &rec);
+    if (ret != 0 || rec.type != ZMK_WATCHDOG_INCIDENT_FATAL || rec.detail.fatal.reason != 3) {
+        LOG_ERR("fatal incident record mismatch: ret=%d type=%d reason=%u", ret, rec.type,
+                rec.detail.fatal.reason);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: watchdog_fatal_handler_end_to_end");
+    return zmk_watchdog_store_delete_all();
+}
+
+#endif /* CONFIG_ZMK_WATCHDOG_FATAL_DETECT */
+
 static int watchdog_test_init(void) {
     int ret = test_settings_backend_init();
     if (ret < 0) {
@@ -398,7 +593,39 @@ static int watchdog_test_init(void) {
         return ret;
     }
 
-    return test_pending_convert_bad_crc();
+    ret = test_pending_convert_bad_crc();
+    if (ret < 0) {
+        return ret;
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_FATAL_DETECT)
+    ret = test_fatal_build_record();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_fatal_handler_end_to_end();
+    if (ret < 0) {
+        return ret;
+    }
+#endif
+
+    /*
+     * Freeze test runs LAST: zmk_watchdog_inject_freeze() permanently blocks
+     * the system workqueue (the injected work item sleeps forever and never
+     * returns), so nothing else can ever be submitted to/run on sysworkq
+     * again for the rest of this process's life -- including the "sysworkq"
+     * task_wdt channel's own feed work, which is the point, but also any
+     * other test that might otherwise rely on sysworkq afterwards.
+     */
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_FREEZE_DETECT) && IS_ENABLED(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+    ret = test_freeze_detect();
+    if (ret < 0) {
+        return ret;
+    }
+#endif
+
+    return 0;
 }
 
 /* Run before the low-priority-workqueue pending-conversion hook would fire

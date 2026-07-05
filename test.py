@@ -76,16 +76,32 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_STUDIO=y",
                         "CONFIG_ZMK_WATCHDOG=y",
                         "CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y",
+                        # Detectors (Phase C): default y whenever ZMK_WATCHDOG
+                        # is on, on a real (non-native_sim) board.
+                        "CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y",
+                        "CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y",
+                        "CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y",
+                        "CONFIG_TASK_WDT=y",
+                        "CONFIG_TASK_WDT_HW_FALLBACK=y",
                     ],
-                    device=[],
+                    device=[
+                        # xiao_ble's nRF52840 wdt0 node, used as the task_wdt
+                        # hardware fallback device.
+                        "DT_COMPAT_HAS_OKAY_nordic_nrf_wdt",
+                    ],
                 ),
                 "module_watchdog_board_without_rpc": ConfigAndDeviceTree(
                     config=[
                         "CONFIG_ZMK_WATCHDOG=y",
                         "# CONFIG_ZMK_STUDIO is not set",
                         NotFound("CONFIG_ZMK_WATCHDOG_STUDIO_RPC"),
+                        "CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y",
+                        "CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y",
+                        "CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y",
                     ],
-                    device=[],
+                    device=[
+                        "DT_COMPAT_HAS_OKAY_nordic_nrf_wdt",
+                    ],
                 ),
                 "custom_settings_board": ConfigAndDeviceTree(
                     config=[

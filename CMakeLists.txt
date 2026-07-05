@@ -2,6 +2,19 @@ zephyr_include_directories(include)
 if(CONFIG_ZMK_WATCHDOG)
     target_sources(app PRIVATE src/watchdog_store.c)
     target_sources(app PRIVATE src/watchdog_pending.c)
+    target_sources(app PRIVATE src/watchdog_reset_cause.c)
+
+    if(CONFIG_ZMK_WATCHDOG_FREEZE_DETECT)
+        target_sources(app PRIVATE src/watchdog_freeze.c)
+    endif()
+
+    if(CONFIG_ZMK_WATCHDOG_FATAL_DETECT)
+        target_sources(app PRIVATE src/watchdog_fatal.c)
+    endif()
+
+    if(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+        target_sources(app PRIVATE src/watchdog_inject.c)
+    endif()
 
     if(CONFIG_ZMK_WATCHDOG_TEST)
         target_sources(app PRIVATE src/test/watchdog_test.c)

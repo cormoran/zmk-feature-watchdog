@@ -285,7 +285,7 @@ bool zmk_watchdog_store_recording_stopped(void) {
  * -------------------------------------------------------------------- */
 
 static int watchdog_settings_set(const char *name, size_t len, settings_read_cb read_cb,
-                                  void *cb_arg) {
+                                 void *cb_arg) {
     const char *next;
     int name_len = settings_name_next(name, &next);
 

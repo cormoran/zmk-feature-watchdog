@@ -3,6 +3,7 @@ config ZMK_WATCHDOG
     select SETTINGS
     select CRC
     select ZMK_LOW_PRIORITY_WORK_QUEUE
+    select HWINFO
 
 if ZMK_WATCHDOG
 
@@ -27,6 +28,68 @@ config ZMK_WATCHDOG_PENDING_CONVERT_DELAY_MS
 config ZMK_WATCHDOG_STUDIO_RPC
     bool "Expose watchdog incident log via custom Studio RPC"
     depends on ZMK_STUDIO
+
+config ZMK_WATCHDOG_FREEZE_DETECT
+    bool "Detect long thread/work-queue freezes via Zephyr's task watchdog"
+    default y
+    select TASK_WDT
+    help
+      Monitors the system workqueue (and the ZMK low-priority workqueue) with
+      one task_wdt channel each, fed by a self-rescheduling k_work_delayable
+      on the monitored queue itself. If a queue is blocked longer than
+      CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS, the feed work never runs and the
+      channel's callback records a FREEZE incident and reboots.
+
+if ZMK_WATCHDOG_FREEZE_DETECT
+
+config ZMK_WATCHDOG_FREEZE_TIMEOUT_MS
+    int "Freeze detection timeout (ms)"
+    default 5000
+    help
+      task_wdt channel timeout for each monitored work queue. The feed period
+      is this value divided by 4. Keep this well above worst-case legitimate
+      stalls (BLE connection storms, settings flash writes) but short enough
+      that a real freeze is noticed quickly.
+
+config ZMK_WATCHDOG_HW_FALLBACK
+    bool "Back the task watchdog with the hardware watchdog"
+    default y if !ARCH_POSIX
+    default n if ARCH_POSIX
+    select TASK_WDT_HW_FALLBACK
+    select WATCHDOG
+    help
+      Passes a real hardware watchdog device (devicetree alias
+      "watchdog0", or the first enabled node of a known watchdog
+      compatible) to task_wdt_init() so a hard lockup that prevents even
+      the task_wdt timer ISR from running (e.g. an IRQ storm) still resets
+      the chip. Not available/meaningful on native_sim (no hardware
+      watchdog device), so this defaults to n there.
+
+      Note (verified on this project's XIAO nRF52840 + J-Link rig): Zephyr's
+      task_wdt calls wdt_setup(..., WDT_OPT_PAUSE_HALTED_BY_DBG), so a J-Link
+      halt pauses the hardware watchdog and does not reset the board.
+
+endif # ZMK_WATCHDOG_FREEZE_DETECT
+
+config ZMK_WATCHDOG_FATAL_DETECT
+    bool "Detect hard faults (stack overflow, bus fault, oops/panic, ...)"
+    default y
+    help
+      Overrides the weak k_sys_fatal_error_handler() to record a FATAL
+      incident (reason, PC, LR, thread name) before rebooting, instead of
+      Zephyr's default behavior of halting forever. Any other code in the
+      application that also overrides k_sys_fatal_error_handler will
+      silently conflict with this one at link time (last object wins) --
+      there is no compile-time error.
+
+config ZMK_WATCHDOG_TEST_INJECTION
+    bool "Enable dangerous test/fault injection helpers"
+    default n
+    help
+      Adds internal helpers that deliberately freeze a monitored work queue
+      or trigger a kernel oops, for validating the freeze/fatal detectors
+      end-to-end (native_sim tests, hardware bring-up). Never enable this in
+      a production build. No RPC is wired to these yet (see a later phase).
 
 config ZMK_WATCHDOG_TEST
     bool "Enable watchdog self-test (native_sim only)"

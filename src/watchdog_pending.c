@@ -33,6 +33,14 @@ struct zmk_watchdog_pending {
  * relying on retained RAM across a process restart. See DESIGN.md SS5. */
 static struct zmk_watchdog_pending pending __noinit;
 
+/* Set by zmk_watchdog_pending_convert() the first time it finds a valid
+ * pending record this boot. Deliberately "sticky" (never cleared) so it
+ * still reflects the truth even after the slot itself has been zeroed. Not
+ * __noinit: this only needs to be valid within a single boot. */
+static bool had_incident_this_boot;
+
+bool zmk_watchdog_pending_had_incident_this_boot(void) { return had_incident_this_boot; }
+
 static uint32_t pending_crc(const struct zmk_watchdog_incident_record *rec) {
     return crc32_ieee((const uint8_t *)rec, sizeof(*rec));
 }
@@ -75,6 +83,11 @@ int zmk_watchdog_pending_convert(void) {
      * reprocessed on the next boot. */
     pending_clear();
 
+    /* Valid record found -- this reboot is already explained, regardless of
+     * whether the store below has room for it. See
+     * zmk_watchdog_pending_had_incident_this_boot()'s doc comment. */
+    had_incident_this_boot = true;
+
     int ret = zmk_watchdog_store_append(&rec);
     if (ret < 0 && ret != -ENOSPC) {
         LOG_ERR("Failed to convert pending watchdog incident: %d", ret);
@@ -105,7 +118,7 @@ static K_WORK_DELAYABLE_DEFINE(pending_convert_work, pending_convert_work_handle
 
 static int watchdog_pending_boot_hook(void) {
     k_work_schedule_for_queue(zmk_workqueue_lowprio_work_q(), &pending_convert_work,
-                               K_MSEC(CONFIG_ZMK_WATCHDOG_PENDING_CONVERT_DELAY_MS));
+                              K_MSEC(CONFIG_ZMK_WATCHDOG_PENDING_CONVERT_DELAY_MS));
     return 0;
 }
 

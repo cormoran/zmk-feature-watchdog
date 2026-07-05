@@ -176,6 +176,19 @@ int zmk_watchdog_pending_convert(void);
  * No-op if no record is pending. Not for production use. */
 void zmk_watchdog_pending_corrupt_crc_for_test(void);
 
+/* True if the most recent zmk_watchdog_pending_convert() call found a valid
+ * pending record (whether or not the store had room for it) -- i.e. this
+ * boot followed a reboot that a freeze/fatal detector itself initiated and
+ * already explained. False if the slot was empty/invalid, or
+ * zmk_watchdog_pending_convert() has not run yet this boot.
+ *
+ * Used by the boot-time reset-cause audit (src/watchdog_reset_cause.c) to
+ * decide whether a WATCHDOG/CPU_LOCKUP/BROWNOUT hwinfo reset cause is
+ * redundant with an incident already recorded by the pending-slot path, or
+ * is a "degraded" reset with no detail (hard lockup, HW-WDT-only reset)
+ * that deserves its own RESET_CAUSE incident. See DESIGN.md SS4.3. */
+bool zmk_watchdog_pending_had_incident_this_boot(void);
+
 /*
  * ---------------------------------------------------------------------
  * Reboot wrapper (src/watchdog_pending.c).
@@ -197,6 +210,58 @@ void zmk_watchdog_reboot(void);
 /* Test-only hook: replace what zmk_watchdog_reboot() does. Pass NULL to
  * restore the real sys_reboot() behavior. Not for production use. */
 void zmk_watchdog_reboot_set_override(zmk_watchdog_reboot_fn_t override);
+
+/*
+ * ---------------------------------------------------------------------
+ * Fatal-error record builder (src/watchdog_fatal.c), gated behind
+ * CONFIG_ZMK_WATCHDOG_FATAL_DETECT.
+ *
+ * Factored out of the k_sys_fatal_error_handler() override so tests can
+ * exercise the record-building logic directly with a synthetic esf, rather
+ * than actually faulting native_sim (unsafe/unreliable) or re-registering
+ * the weak k_sys_fatal_error_handler symbol.
+ * ---------------------------------------------------------------------
+ */
+
+struct arch_esf; /* Forward-declared by zephyr/arch/arch_interface.h. */
+
+/* Fill *rec with a FATAL incident describing (reason, esf): reason code,
+ * esf->basic.pc/lr on ARM (0 on architectures without that field, e.g.
+ * native_sim), and the current thread's name ("?" if CONFIG_THREAD_NAME is
+ * off or the name is unset). esf may be NULL. Does not touch the pending
+ * slot or reboot -- callers (the real handler, or a test) do that. */
+void watchdog_fatal_build_record(struct zmk_watchdog_incident_record *rec, unsigned int reason,
+                                 const struct arch_esf *esf);
+
+/*
+ * ---------------------------------------------------------------------
+ * Test/fault injection (src/watchdog_inject.c), gated behind
+ * CONFIG_ZMK_WATCHDOG_TEST_INJECTION (default n -- dangerous, never enable
+ * in a production build). Exercises the freeze/fatal detectors end-to-end.
+ * No RPC is wired to these yet; a later phase adds that.
+ * ---------------------------------------------------------------------
+ */
+
+/* Submits a k_work to the system workqueue whose handler calls
+ * k_sleep(K_FOREVER), simulating a frozen sysworkq. Combined with
+ * CONFIG_ZMK_WATCHDOG_FREEZE_DETECT, the "sysworkq" task_wdt channel will
+ * eventually fire (after CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS of
+ * unanswered feed work). */
+void zmk_watchdog_inject_freeze(void);
+
+/* Triggers a kernel oops (k_oops()), exercising
+ * CONFIG_ZMK_WATCHDOG_FATAL_DETECT's k_sys_fatal_error_handler override. */
+void zmk_watchdog_inject_fatal(void);
+
+/* Test-only helper (src/watchdog_freeze.c, requires
+ * CONFIG_ZMK_WATCHDOG_FREEZE_DETECT): stop the task_wdt channel monitoring
+ * the system workqueue from ever firing again. Production code never needs
+ * this (a real firing reboots the device); it exists so a test that
+ * deliberately froze sysworkq via zmk_watchdog_inject_freeze() -- which
+ * cannot be unblocked afterwards -- can stop the channel from repeatedly
+ * re-firing (and calling zmk_watchdog_reboot() again) for the rest of the
+ * test process's life. Not for production use. */
+void zmk_watchdog_freeze_disarm_sysworkq_channel_for_test(void);
 
 #ifdef __cplusplus
 }

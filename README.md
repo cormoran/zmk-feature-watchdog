@@ -58,6 +58,15 @@ For more info on modules, you can read through through the [Zephyr modules page]
    # overwrite -- see "Flash-wear protection" below).
    CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS=16
 
+   # Detectors -- default y once CONFIG_ZMK_WATCHDOG=y, only shown here for
+   # reference. Disable individually if you don't want a given detector.
+   CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y
+   CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS=5000
+   # Hardware watchdog fallback (nRF wdt0 or board's "watchdog0" alias).
+   # Defaults to y on real boards, n on native_sim.
+   CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
+   CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
+
    # Optionally enable custom Studio RPC (not implemented yet, see below)
    CONFIG_ZMK_STUDIO=y
    CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y
@@ -67,13 +76,23 @@ For more info on modules, you can read through through the [Zephyr modules page]
    CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
    ```
 
-3. TODO: detectors (freeze/fatal), the Studio RPC surface, and the web UI
-   are not implemented yet -- this module currently only provides the
-   incident store and the retained-RAM pending slot that crosses a reboot.
-   For now see:
-   - `include/cormoran/zmk/watchdog.h` — incident record type + store/pending API
+   **Important conflict note**: `CONFIG_ZMK_WATCHDOG_FATAL_DETECT` overrides
+   Zephyr's weak `k_sys_fatal_error_handler()` symbol. If any other module or
+   application code in your build also defines that symbol, one of the two
+   definitions silently wins at link time (no compile error) -- only one
+   fatal handler can be active.
+
+3. TODO: the Studio RPC surface and the web UI are not implemented yet --
+   this module currently provides the incident store, the retained-RAM
+   pending slot that crosses a reboot, and the three detectors (freeze,
+   fatal, boot-time reset-cause audit). For now see:
+   - `include/cormoran/zmk/watchdog.h` — incident record type + store/pending/detector API
    - `src/watchdog_store.c` — settings-backed incident store
    - `src/watchdog_pending.c` — retained-RAM pending slot + boot conversion
+   - `src/watchdog_freeze.c` — task_wdt-based freeze detector (sysworkq + ZMK low-priority queue)
+   - `src/watchdog_fatal.c` — `k_sys_fatal_error_handler()` override (hard faults, oops/panic)
+   - `src/watchdog_reset_cause.c` — boot-time `hwinfo` reset-cause audit
+   - `src/watchdog_inject.c` — dangerous test/fault injection helpers (`CONFIG_ZMK_WATCHDOG_TEST_INJECTION`, default n)
    - `proto/cormoran/watchdog/watchdog.proto` — message types (placeholder)
    - `src/studio/watchdog_handler.c` — firmware RPC handler (placeholder)
    - `web/src/App.tsx` — web UI (placeholder)
