@@ -19,6 +19,12 @@ export const SUBSYSTEM_IDENTIFIER = "cormoran__watchdog";
 
 const PAGE_SIZE = 4;
 
+// How long to wait for a peripheral to answer a relayed request (DESIGN.md
+// SS7) before giving up -- there is no way to know which peripheral slots
+// are currently connected, so a relayed request to a disconnected/missing
+// peripheral would otherwise hang forever.
+const RELAY_TIMEOUT_MS = 3000;
+
 interface Status {
   capacity: number;
   stored: number;
@@ -28,6 +34,11 @@ interface Status {
 
 export function IncidentsSection() {
   const zmkApp = useContext(ZMKAppContext);
+  // 0 = central/local (the only source in Phase D); >0 = split peripheral
+  // slot N, relayed over CONFIG_ZMK_SPLIT_RELAY_EVENT (DESIGN.md SS7). There
+  // is no discovery of how many peripherals are connected, so this offers a
+  // small fixed range -- enough for the common single/dual-peripheral split.
+  const [source, setSource] = useState(0);
   const [status, setStatus] = useState<Status | null>(null);
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -51,8 +62,71 @@ export function IncidentsSection() {
     [zmkApp, subsystem]
   );
 
+  // Awaits the real Response for a request that came back as a
+  // DeferredResponse (source != 0, see DESIGN.md SS7): subscribes to
+  // PeripheralResponse notifications and resolves on the first one matching
+  // requestId, or null after RELAY_TIMEOUT_MS with no answer (peripheral
+  // disconnected/absent -- a documented v1 limitation, there is no way to
+  // detect this ahead of time).
+  const awaitPeripheralResponse = useCallback(
+    (requestId: number): Promise<Response | null> => {
+      return new Promise((resolve) => {
+        if (!zmkApp || !subsystem) {
+          resolve(null);
+          return;
+        }
+        let settled = false;
+        const finish = (value: Response | null) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          unsubscribe();
+          resolve(value);
+        };
+        const unsubscribe = zmkApp.onNotification({
+          type: "custom",
+          subsystemIndex: subsystem.index,
+          callback: (customNotification) => {
+            let notification: Notification;
+            try {
+              notification = Notification.decode(customNotification.payload);
+            } catch {
+              return;
+            }
+            const pr = notification.peripheralResponse;
+            if (pr && pr.requestId === requestId) {
+              finish(pr.response ?? null);
+            }
+          },
+        });
+        const timer = setTimeout(() => finish(null), RELAY_TIMEOUT_MS);
+      });
+    },
+    [zmkApp, subsystem]
+  );
+
+  // Calls the RPC and, if it came back as a DeferredResponse (relayed to a
+  // split peripheral), waits for the real answer instead. Returns null (and
+  // sets an error) on timeout.
+  const callRpcAwaitingRelay = useCallback(
+    async (request: Request): Promise<Response | null> => {
+      const resp = await callRpc(request);
+      if (!resp?.deferred) return resp;
+      const relayed = await awaitPeripheralResponse(resp.deferred.requestId);
+      if (!relayed) {
+        setError(
+          `Peripheral ${source} did not respond (timed out after ${RELAY_TIMEOUT_MS}ms). It may be disconnected.`
+        );
+      }
+      return relayed;
+    },
+    [callRpc, awaitPeripheralResponse, source]
+  );
+
   const refreshStatus = useCallback(async () => {
-    const resp = await callRpc(Request.create({ getStatus: {} }));
+    const resp = await callRpcAwaitingRelay(
+      Request.create({ getStatus: { source } })
+    );
     if (resp?.status) {
       setStatus({
         capacity: resp.status.capacity,
@@ -63,7 +137,7 @@ export function IncidentsSection() {
     } else if (resp?.error) {
       setError(resp.error.message);
     }
-  }, [callRpc]);
+  }, [callRpcAwaitingRelay, source]);
 
   const refreshIncidents = useCallback(async () => {
     const collected: Incident[] = [];
@@ -71,8 +145,8 @@ export function IncidentsSection() {
     // Fetch all pages on connect/refresh -- the store is capped (default 16
     // incidents), so this is at most a handful of round-trips.
     for (let guard = 0; guard < 64; guard++) {
-      const resp = await callRpc(
-        Request.create({ listIncidents: { startIndex } })
+      const resp = await callRpcAwaitingRelay(
+        Request.create({ listIncidents: { startIndex, source } })
       );
       if (!resp?.incidentPage) {
         if (resp?.error) {
@@ -90,7 +164,7 @@ export function IncidentsSection() {
       }
     }
     setIncidents(collected);
-  }, [callRpc]);
+  }, [callRpcAwaitingRelay, source]);
 
   const refreshAll = useCallback(async () => {
     setIsLoading(true);
@@ -123,9 +197,10 @@ export function IncidentsSection() {
     return () => {
       cancelled = true;
     };
-    // Run once when the connected watchdog subsystem becomes available.
+    // Re-run when the connected watchdog subsystem becomes available, or
+    // when the user switches source (central/peripheral).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [subsystem?.index, zmkApp?.state.connection]);
+  }, [subsystem?.index, zmkApp?.state.connection, source]);
 
   useEffect(() => {
     if (!zmkApp || !subsystem) return;
@@ -140,8 +215,15 @@ export function IncidentsSection() {
         } catch {
           return;
         }
+        // Only IncidentRecorded is a live/spontaneous push -- it always
+        // describes this device's own local store (source 0), matching
+        // Phase D behavior unchanged. PeripheralResponse notifications are
+        // consumed by awaitPeripheralResponse() above (they are answers to
+        // a specific requestId, not a general live-update stream) and
+        // intentionally ignored here.
         if (notification.incidentRecorded?.incident) {
           const incident = notification.incidentRecorded.incident;
+          if (source !== 0) return;
           setIncidents((prev) => [
             incident,
             ...prev.filter((i) => i.id !== incident.id),
@@ -153,14 +235,14 @@ export function IncidentsSection() {
 
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [zmkApp, subsystem?.index]);
+  }, [zmkApp, subsystem?.index, source]);
 
   const deleteOne = async (id: number) => {
     setIsLoading(true);
     setError(null);
     try {
-      const resp = await callRpc(
-        Request.create({ deleteIncidents: { ids: [id], all: false } })
+      const resp = await callRpcAwaitingRelay(
+        Request.create({ deleteIncidents: { ids: [id], all: false, source } })
       );
       if (resp?.error) {
         setError(resp.error.message);
@@ -176,8 +258,8 @@ export function IncidentsSection() {
     setError(null);
     setConfirmingDeleteAll(false);
     try {
-      const resp = await callRpc(
-        Request.create({ deleteIncidents: { ids: [], all: true } })
+      const resp = await callRpcAwaitingRelay(
+        Request.create({ deleteIncidents: { ids: [], all: true, source } })
       );
       if (resp?.error) {
         setError(resp.error.message);
@@ -203,10 +285,42 @@ export function IncidentsSection() {
     );
   }
 
+  // A fixed small range -- there is no RPC to discover how many peripherals
+  // are connected (DESIGN.md SS7), so this just offers "Central" plus a
+  // handful of peripheral slots. Selecting a peripheral re-fetches status
+  // and incidents relayed from that half's own local store.
+  const sourceOptions = [0, 1, 2, 3];
+
   return (
     <>
       <section className="card">
         <h2>Status</h2>
+        <div className="source-selector">
+          <label htmlFor="watchdog-source-select">
+            <strong>Source:</strong>
+          </label>
+          <select
+            id="watchdog-source-select"
+            value={source}
+            disabled={isLoading}
+            onChange={(e) => setSource(Number(e.target.value))}
+          >
+            {sourceOptions.map((s) => (
+              <option key={s} value={s}>
+                {sourceLabel(s)}
+              </option>
+            ))}
+          </select>
+        </div>
+        {source !== 0 && (
+          <div className="warning-message">
+            <p>
+              ℹ️ Peripheral incidents are relayed over the split link and may
+              take a few seconds, or time out if the peripheral is disconnected
+              (see README).
+            </p>
+          </div>
+        )}
         {error && (
           <div className="error-message">
             <p>🚨 {error}</p>

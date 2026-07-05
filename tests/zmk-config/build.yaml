@@ -7,7 +7,7 @@ include:
     board: xiao_ble//zmk
     shield: tester_xiao
     # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512: watchdog's IncidentPage response
-    # (up to 4 incidents) needs more than the default 64-byte TX buffer --
+    # (up to 3 incidents) needs more than the default 64-byte TX buffer --
     # see the BUILD_ASSERT + size arithmetic in src/studio/watchdog_handler.c.
     cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y -DCONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
     snippet: studio-rpc-usb-uart
@@ -24,3 +24,30 @@ include:
     # comment above.
     cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y -DCONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
     snippet: studio-rpc-usb-uart
+
+  # Split keyboard build coverage (DESIGN.md SS7): peripheral role (relay +
+  # watchdog core, no Studio of its own) and central role (local RPC + relay
+  # proxy) built as separate firmware images, proving both roles compile --
+  # end-to-end relay behavior is covered by the native_sim
+  # tests/split_peripheral test (no real split hardware in this environment;
+  # see DESIGN.md SS12).
+  - artifact: module_watchdog_split_peripheral
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    snippet: watchdog-split-rpc-relay
+
+  # CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=y is added here (rather than a
+  # dedicated native_sim test) because the central-role self-test needs
+  # zmk_split_central_send_relay_event(), only implemented by the real BLE
+  # split transport (CONFIG_ZMK_SPLIT_BLE) -- native_sim would need a
+  # working BT stack to link it, which is out of scope for this check. This
+  # build only proves the central dispatch test code compiles/links; its
+  # PASS/FAIL boot-log output is not observable without real hardware.
+  - artifact: module_watchdog_split_central
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=y
+    snippets:
+      - studio-rpc-usb-uart
+      - watchdog-split-rpc-relay
+      - watchdog-split-central

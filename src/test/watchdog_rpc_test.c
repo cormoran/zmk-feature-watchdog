@@ -309,8 +309,10 @@ static int test_rpc_list_incidents_empty_store(void) {
 
 static int test_rpc_list_incidents_pagination_and_delete(void) {
     /* Populate: one of each incident type, plus enough extras to force two
-     * pages (page size is 4, see WATCHDOG_RPC_PAGE_SIZE in
-     * src/studio/watchdog_handler.c). */
+     * pages (page size is 3, see WATCHDOG_RPC_PAGE_SIZE in
+     * src/studio/watchdog_request_exec.c -- kept at 3 rather than 4 so a
+     * relayed RelayResponse wrapping a full page still fits the split relay
+     * transport's 255-byte hard ceiling, see watchdog.options). */
     struct zmk_watchdog_incident_record freeze_rec = {0};
     freeze_rec.type = ZMK_WATCHDOG_INCIDENT_FREEZE;
     freeze_rec.uptime_s = 10;
@@ -364,7 +366,7 @@ static int test_rpc_list_incidents_pagination_and_delete(void) {
         return -EINVAL;
     }
 
-    /* First page: 4 incidents, total=5. */
+    /* First page: 3 incidents, total=5. */
     cormoran_watchdog_Request req = cormoran_watchdog_Request_init_zero;
     req.which_request_type = cormoran_watchdog_Request_list_incidents_tag;
     req.request_type.list_incidents.start_index = 0;
@@ -375,7 +377,7 @@ static int test_rpc_list_incidents_pagination_and_delete(void) {
     }
     if (resp.which_response_type != cormoran_watchdog_Response_incident_page_tag ||
         resp.response_type.incident_page.total != 5 ||
-        resp.response_type.incident_page.incidents_count != 4 ||
+        resp.response_type.incident_page.incidents_count != 3 ||
         resp.response_type.incident_page.start_index != 0) {
         LOG_ERR("unexpected first page: type=%d total=%u count=%u start=%u",
                 resp.which_response_type, resp.response_type.incident_page.total,
@@ -401,7 +403,8 @@ static int test_rpc_list_incidents_pagination_and_delete(void) {
     if (second->type != cormoran_watchdog_IncidentType_FATAL ||
         second->which_detail != cormoran_watchdog_Incident_fatal_tag ||
         second->detail.fatal.reason != 4 || second->detail.fatal.pc != 0x1000 ||
-        second->detail.fatal.lr != 0x2000 || strcmp(second->detail.fatal.thread_name, "main") != 0) {
+        second->detail.fatal.lr != 0x2000 ||
+        strcmp(second->detail.fatal.thread_name, "main") != 0) {
         LOG_ERR("second incident (fatal) mismatch");
         return -EINVAL;
     }
@@ -416,14 +419,14 @@ static int test_rpc_list_incidents_pagination_and_delete(void) {
 
     uint32_t first_id = first->id;
 
-    /* Second page: remaining 1 incident. */
-    req.request_type.list_incidents.start_index = 4;
+    /* Second page: remaining 2 incidents. */
+    req.request_type.list_incidents.start_index = 3;
     if (!call_watchdog_rpc(&req, &resp)) {
         return -EINVAL;
     }
     if (resp.response_type.incident_page.total != 5 ||
-        resp.response_type.incident_page.incidents_count != 1 ||
-        resp.response_type.incident_page.start_index != 4) {
+        resp.response_type.incident_page.incidents_count != 2 ||
+        resp.response_type.incident_page.start_index != 3) {
         LOG_ERR("unexpected second page: total=%u count=%u start=%u",
                 resp.response_type.incident_page.total,
                 (unsigned int)resp.response_type.incident_page.incidents_count,

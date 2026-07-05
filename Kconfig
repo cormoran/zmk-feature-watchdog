@@ -28,6 +28,59 @@ config ZMK_WATCHDOG_PENDING_CONVERT_DELAY_MS
 config ZMK_WATCHDOG_STUDIO_RPC
     bool "Expose watchdog incident log via custom Studio RPC"
     depends on ZMK_STUDIO
+    select ZMK_WATCHDOG_PROTOBUF
+
+# Hidden: pulls in nanopb (+ the same encoding options ZMK_STUDIO itself
+# implies) for whichever of ZMK_WATCHDOG_STUDIO_RPC/ZMK_WATCHDOG_SPLIT_RELAY
+# is enabled -- a split peripheral build enables the latter without
+# ZMK_STUDIO (which is what normally selects NANOPB), so this module must
+# select it itself rather than assuming ZMK_STUDIO already did.
+config ZMK_WATCHDOG_PROTOBUF
+    bool
+    select NANOPB
+    imply NANOPB_NO_ERRMSG
+    imply NANOPB_WITHOUT_64BIT
+    imply NANOPB_NO_ENCODE_SIZE_CHECK
+
+config ZMK_WATCHDOG_SPLIT_RELAY
+    bool "Relay watchdog Studio RPC to split peripherals"
+    default y if ZMK_SPLIT
+    depends on ZMK_SPLIT_RELAY_EVENT
+    select ZMK_WATCHDOG_PROTOBUF
+    help
+      Enable on BOTH halves of a split keyboard to reach a peripheral's own
+      incident log through the central's cormoran__watchdog Studio RPC
+      subsystem: any GetStatus/ListIncidents/DeleteIncidents request with a
+      nonzero `source` is relayed to the matching peripheral over
+      CONFIG_ZMK_SPLIT_RELAY_EVENT, and the response arrives back as a
+      PeripheralResponse Studio notification (relaying is asynchronous,
+      unlike a local request). Increase CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
+      if your build fails a BUILD_ASSERT about the relayed request/response
+      payload size.
+      Note: the underlying split relay event transport broadcasts to every
+      connected peripheral, not to one addressed peripheral -- with more
+      than one peripheral, every peripheral answers every relayed request
+      (each correctly tagged with its own source), which does not compose
+      well with a UI that only expects an answer from a specific one. Safe
+      to enable for a build with a single peripheral. There is also no way
+      for the central to know which peripheral slots are currently
+      connected, so a relayed request to a disconnected peripheral simply
+      never produces a response -- the web UI must time out on its own.
+
+config ZMK_WATCHDOG_SPLIT_RELAY_TEST
+    bool "Enable native_sim-only watchdog split relay test hooks"
+    depends on ZMK_WATCHDOG_SPLIT_RELAY
+    help
+      Adds a boot-time self-test that bypasses the real split transport
+      (which native_sim cannot exercise end-to-end) and asserts firmware
+      behavior directly, printing PASS/FAIL to the log:
+        - Peripheral role: synthesizes a relayed ListIncidents/
+          DeleteIncidents request locally and asserts the resulting relay
+          response, exercising watchdog_request_exec_handle() the same way
+          a real relayed request would.
+        - Central role: asserts watchdog_relay_dispatch_request() always
+          returns a DeferredResponse with a distinct, nonzero request_id.
+      Not for production builds.
 
 config ZMK_WATCHDOG_FREEZE_DETECT
     bool "Detect long thread/work-queue freezes via Zephyr's task watchdog"

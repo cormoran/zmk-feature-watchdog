@@ -117,6 +117,40 @@ class WestCommandsTests(unittest.TestCase):
                     ],
                     device=[],
                 ),
+                # Split keyboard build coverage (DESIGN.md SS7). Peripheral
+                # role: no Studio (ZMK_STUDIO only selects ZMK_STUDIO_RPC for
+                # !ZMK_SPLIT || ZMK_SPLIT_ROLE_CENTRAL), but the relay bridge
+                # (peripheral responder side) + watchdog core still compile
+                # and CONFIG_ZMK_WATCHDOG_PROTOBUF pulls in nanopb on its own.
+                "module_watchdog_split_peripheral": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_WATCHDOG=y",
+                        "CONFIG_ZMK_SPLIT=y",
+                        NotFound("CONFIG_ZMK_SPLIT_ROLE_CENTRAL=y"),
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
+                        "CONFIG_ZMK_WATCHDOG_SPLIT_RELAY=y",
+                        "CONFIG_ZMK_WATCHDOG_PROTOBUF=y",
+                        NotFound("CONFIG_ZMK_STUDIO=y"),
+                        NotFound("CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y"),
+                    ],
+                    device=[],
+                ),
+                # Central role: local Studio RPC + the relay bridge dispatch
+                # side.
+                "module_watchdog_split_central": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_WATCHDOG=y",
+                        "CONFIG_ZMK_SPLIT=y",
+                        "CONFIG_ZMK_SPLIT_ROLE_CENTRAL=y",
+                        "CONFIG_ZMK_SPLIT_RELAY_EVENT=y",
+                        "CONFIG_ZMK_WATCHDOG_SPLIT_RELAY=y",
+                        "CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=y",
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y",
+                        "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512",
+                    ],
+                    device=[],
+                ),
             }
         )
 

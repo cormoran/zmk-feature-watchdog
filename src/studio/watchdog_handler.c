@@ -16,15 +16,20 @@
 #include <zmk/studio/custom.h>
 #include <cormoran/watchdog/watchdog.pb.h>
 #include <cormoran/zmk/watchdog.h>
+#include <cormoran/zmk/watchdog_request_exec.h>
+
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_SPLIT_RELAY)
+#include <cormoran/zmk/watchdog_relay.h>
+#endif
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 /*
  * Response size budget (DESIGN.md SS8): the worst case is IncidentPage with
- * CONFIG_ZMK_WATCHDOG_STUDIO_RPC_PAGE_SIZE (4) FatalDetail incidents (the
- * largest detail variant -- reason/pc/lr uint32 fields + a 16-byte
- * thread_name string).
+ * WATCHDOG_RPC_PAGE_SIZE (3, see src/studio/watchdog_request_exec.c) FatalDetail
+ * incidents (the largest detail variant -- reason/pc/lr uint32 fields + a
+ * 16-byte thread_name string).
  *
  * Per-Incident encoded size, upper bound:
  *   id, source, type, boot_ordinal, uptime_s (5 uint32 fields)  ~= 5 * 6  = 30
@@ -35,18 +40,19 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  *   ------------------------------------------------------------------
  *   per incident                                                ~=       70
  *
- * 4 incidents                                                    ~=      280
+ * 3 incidents                                                    ~=      210
  * IncidentPageResponse.total + start_index (2 uint32 fields)      ~=       12
  * Response oneof wrapper (tag+len)                                ~=        4
  * ------------------------------------------------------------------------
- * total                                                           ~=      296
+ * total                                                           ~=      226
  *
  * Rounded up with headroom -> comfortably under a 512-byte TX buffer.
  * CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512 is configured in
- * tests/studio/native_sim.conf and tests/zmk-config/build.yaml.
+ * tests/studio/native_sim.conf and tests/zmk-config/build.yaml. (Page size
+ * is 3 rather than 4 because it is shared with the split relay path -- see
+ * watchdog.options' comment on IncidentPageResponse.incidents max_count.)
  */
-#define WATCHDOG_RPC_PAGE_SIZE 4
-#define WATCHDOG_RPC_ESTIMATED_MAX_RESPONSE_SIZE 296
+#define WATCHDOG_RPC_ESTIMATED_MAX_RESPONSE_SIZE 226
 
 BUILD_ASSERT(WATCHDOG_RPC_ESTIMATED_MAX_RESPONSE_SIZE + 64 <= CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE,
              "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE is too small for a full watchdog IncidentPage "
@@ -67,45 +73,10 @@ ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran__watchdog, &watchdog_feature_meta, watchdog_rp
 ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(cormoran__watchdog, cormoran_watchdog_Response);
 
 /* ------------------------------------------------------------------------
- * Record -> proto conversion.
+ * Record -> proto conversion now lives in src/studio/watchdog_request_exec.c
+ * (watchdog_incident_record_to_proto()), shared with the split relay
+ * peripheral responder (src/split/watchdog_relay.c) -- see DESIGN.md SS7.
  * ---------------------------------------------------------------------- */
-
-static void incident_record_to_proto(uint16_t id, const struct zmk_watchdog_incident_record *rec,
-                                     cormoran_watchdog_Incident *out) {
-    *out = (cormoran_watchdog_Incident)cormoran_watchdog_Incident_init_zero;
-
-    out->id = id;
-    /* Local incidents only in this phase -- a later phase sources this from
-     * the split relay (peripheral slot + 1). */
-    out->source = 0;
-    out->boot_ordinal = rec->boot_ordinal;
-    out->uptime_s = rec->uptime_s;
-
-    switch (rec->type) {
-    case ZMK_WATCHDOG_INCIDENT_FREEZE:
-        out->type = cormoran_watchdog_IncidentType_FREEZE;
-        out->which_detail = cormoran_watchdog_Incident_freeze_tag;
-        out->detail.freeze.channel_id = rec->detail.freeze.channel_id;
-        snprintf(out->detail.freeze.queue_name, sizeof(out->detail.freeze.queue_name), "%s",
-                 rec->detail.freeze.queue_name);
-        break;
-    case ZMK_WATCHDOG_INCIDENT_FATAL:
-        out->type = cormoran_watchdog_IncidentType_FATAL;
-        out->which_detail = cormoran_watchdog_Incident_fatal_tag;
-        out->detail.fatal.reason = rec->detail.fatal.reason;
-        out->detail.fatal.pc = rec->detail.fatal.pc;
-        out->detail.fatal.lr = rec->detail.fatal.lr;
-        snprintf(out->detail.fatal.thread_name, sizeof(out->detail.fatal.thread_name), "%s",
-                 rec->detail.fatal.thread_name);
-        break;
-    case ZMK_WATCHDOG_INCIDENT_RESET_CAUSE:
-    default:
-        out->type = cormoran_watchdog_IncidentType_RESET_CAUSE;
-        out->which_detail = cormoran_watchdog_Incident_reset_tag;
-        out->detail.reset.cause_bits = rec->detail.reset.cause_bits;
-        break;
-    }
-}
 
 /* ------------------------------------------------------------------------
  * IncidentRecorded notification: fired whenever zmk_watchdog_store_append()
@@ -160,7 +131,10 @@ static void on_incident_appended(uint16_t id, const struct zmk_watchdog_incident
     *notification = (cormoran_watchdog_Notification)cormoran_watchdog_Notification_init_zero;
     notification->which_notification_type = cormoran_watchdog_Notification_incident_recorded_tag;
     notification->notification_type.incident_recorded.has_incident = true;
-    incident_record_to_proto(id, rec, &notification->notification_type.incident_recorded.incident);
+    /* source = 0: this callback only fires for incidents this half's own
+     * store just persisted (see the doc comment above). */
+    watchdog_incident_record_to_proto(id, 0, rec,
+                                      &notification->notification_type.incident_recorded.incident);
 
     pb_callback_t payload = {
         .funcs.encode = encode_notification_payload,
@@ -191,7 +165,13 @@ static int watchdog_studio_rpc_init(void) {
 SYS_INIT(watchdog_studio_rpc_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 /* ------------------------------------------------------------------------
- * Request handlers.
+ * Request handlers: GetStatus/ListIncidents/DeleteIncidents execution
+ * against the local store lives in src/studio/watchdog_request_exec.c
+ * (watchdog_request_exec_handle()), shared with the split relay peripheral
+ * responder. This file only needs to decide *where* a request should run:
+ * locally (source == 0) or relayed to a split peripheral (source != 0, see
+ * DESIGN.md SS7) -- and, for the latter, only when
+ * CONFIG_ZMK_WATCHDOG_SPLIT_RELAY is actually enabled.
  * ---------------------------------------------------------------------- */
 
 static void set_error(cormoran_watchdog_Response *resp, const char *message) {
@@ -201,86 +181,20 @@ static void set_error(cormoran_watchdog_Response *resp, const char *message) {
     resp->response_type.error = err;
 }
 
-static int handle_get_status(const cormoran_watchdog_GetStatusRequest *req,
-                             cormoran_watchdog_Response *resp) {
-    ARG_UNUSED(req);
-
-    cormoran_watchdog_StatusResponse status = cormoran_watchdog_StatusResponse_init_zero;
-    status.capacity = zmk_watchdog_store_capacity();
-    status.stored = zmk_watchdog_store_count();
-    status.dropped_since_boot = zmk_watchdog_store_dropped_since_boot();
-    status.recording_stopped = zmk_watchdog_store_recording_stopped();
-
-    resp->which_response_type = cormoran_watchdog_Response_status_tag;
-    resp->response_type.status = status;
-    return 0;
-}
-
-static int handle_list_incidents(const cormoran_watchdog_ListIncidentsRequest *req,
-                                 cormoran_watchdog_Response *resp) {
-    cormoran_watchdog_IncidentPageResponse page = cormoran_watchdog_IncidentPageResponse_init_zero;
-
-    uint16_t total = zmk_watchdog_store_count();
-    uint32_t start = req->start_index;
-
-    page.total = total;
-    page.start_index = start;
-    page.incidents_count = 0;
-
-    for (uint32_t i = start; i < (uint32_t)total && page.incidents_count < WATCHDOG_RPC_PAGE_SIZE;
-         i++) {
-        struct zmk_watchdog_incident_record rec;
-        uint16_t id;
-        int ret = zmk_watchdog_store_get_with_id((uint16_t)i, &rec, &id);
-        if (ret < 0) {
-            /* Store mutated concurrently (delete) between count() and
-             * get_with_id() -- stop the page here rather than erroring the
-             * whole request; the client will see a shorter page than
-             * `total` implied and can re-request if it cares. */
-            break;
-        }
-
-        incident_record_to_proto(id, &rec, &page.incidents[page.incidents_count]);
-        page.incidents_count++;
+/* Returns the `source` field of a GetStatus/ListIncidents/DeleteIncidents
+ * request (0 if the request kind is unset/unsupported -- routed to the
+ * local executor, which will itself produce an ErrorResponse). */
+static uint32_t request_source(const cormoran_watchdog_Request *req) {
+    switch (req->which_request_type) {
+    case cormoran_watchdog_Request_get_status_tag:
+        return req->request_type.get_status.source;
+    case cormoran_watchdog_Request_list_incidents_tag:
+        return req->request_type.list_incidents.source;
+    case cormoran_watchdog_Request_delete_incidents_tag:
+        return req->request_type.delete_incidents.source;
+    default:
+        return 0;
     }
-
-    resp->which_response_type = cormoran_watchdog_Response_incident_page_tag;
-    resp->response_type.incident_page = page;
-    return 0;
-}
-
-static int handle_delete_incidents(const cormoran_watchdog_DeleteIncidentsRequest *req,
-                                   cormoran_watchdog_Response *resp) {
-    uint32_t deleted = 0;
-
-    if (req->all) {
-        uint16_t count_before = zmk_watchdog_store_count();
-        int ret = zmk_watchdog_store_delete_all();
-        if (ret < 0) {
-            set_error(resp, "Failed to delete all incidents");
-            return 0;
-        }
-        deleted = count_before;
-    } else {
-        for (size_t i = 0; i < req->ids_count; i++) {
-            uint32_t id = req->ids[i];
-            if (id > UINT16_MAX) {
-                continue;
-            }
-            int ret = zmk_watchdog_store_delete((uint16_t)id);
-            if (ret == 0) {
-                deleted++;
-            }
-        }
-    }
-
-    cormoran_watchdog_DeleteResultResponse result =
-        cormoran_watchdog_DeleteResultResponse_init_zero;
-    result.deleted = deleted;
-
-    resp->which_response_type = cormoran_watchdog_Response_delete_result_tag;
-    resp->response_type.delete_result = result;
-    return 0;
 }
 
 static bool watchdog_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
@@ -298,24 +212,17 @@ static bool watchdog_rpc_handle_request(const zmk_custom_CallRequest *raw_reques
         return true;
     }
 
-    int rc = 0;
-    switch (req.which_request_type) {
-    case cormoran_watchdog_Request_get_status_tag:
-        rc = handle_get_status(&req.request_type.get_status, resp);
-        break;
-    case cormoran_watchdog_Request_list_incidents_tag:
-        rc = handle_list_incidents(&req.request_type.list_incidents, resp);
-        break;
-    case cormoran_watchdog_Request_delete_incidents_tag:
-        rc = handle_delete_incidents(&req.request_type.delete_incidents, resp);
-        break;
-    default:
-        LOG_WRN("Unsupported watchdog request type: %d", req.which_request_type);
-        rc = -1;
+    uint32_t source = request_source(&req);
+
+    if (source != 0) {
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_SPLIT_RELAY)
+        watchdog_relay_dispatch_request(&req, resp);
+#else
+        set_error(resp, "Split relay not enabled in this firmware");
+#endif
+        return true;
     }
 
-    if (rc != 0) {
-        set_error(resp, "Failed to process request");
-    }
+    watchdog_request_exec_handle(&req, resp);
     return true;
 }

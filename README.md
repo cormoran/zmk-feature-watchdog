@@ -17,10 +17,11 @@ This module includes:
 - **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
 - **Tests**: Firmware unit tests (`tests/studio/`, `tests/watchdog/`) and build tests (`tests/zmk-config/`)
 
-The RPC surface and web UI currently cover **local incidents only** (the
-central, or a non-split board). Reading/deleting a split peripheral's
-incident log through the central is planned for a later phase (DESIGN.md
-Phase E) and not implemented yet.
+On a split keyboard, the central also proxies read/delete requests to a
+connected peripheral's own incident log over ZMK's split relay event
+mechanism (`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`, see DESIGN.md SS7 and
+`src/split/watchdog_relay.c`) -- select "Peripheral N" as the source in the
+web UI's status card.
 
 ## More Info
 
@@ -70,12 +71,13 @@ For more info on modules, you can read through through the [Zephyr modules page]
    CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
    CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
 
-   # Enable custom Studio RPC + web UI (local incidents only for now -- see
-   # the note above about split peripherals).
+   # Enable custom Studio RPC + web UI. Studio RPC only exists on the
+   # central (or a non-split board); a split peripheral does not need
+   # CONFIG_ZMK_STUDIO at all -- see "Split keyboards" below.
    CONFIG_ZMK_STUDIO=y
    CONFIG_ZMK_WATCHDOG_STUDIO_RPC=y
    CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
-   # IncidentPage responses (up to 4 incidents per page) need more than the
+   # IncidentPage responses (up to 3 incidents per page) need more than the
    # default 64-byte TX buffer.
    CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=512
    ```
@@ -86,18 +88,31 @@ For more info on modules, you can read through through the [Zephyr modules page]
    definitions silently wins at link time (no compile error) -- only one
    fatal handler can be active.
 
+   **Split keyboards**: enable `CONFIG_ZMK_WATCHDOG=y` on *both* halves so
+   each detects and stores its own incidents. `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`
+   defaults to `y` whenever `CONFIG_ZMK_SPLIT=y`, so no extra flag is usually
+   needed -- it pulls in nanopb on its own (via a hidden
+   `CONFIG_ZMK_WATCHDOG_PROTOBUF`) so a peripheral build compiles the relay
+   responder without needing `CONFIG_ZMK_STUDIO` at all. Only the central
+   needs `CONFIG_ZMK_STUDIO`/`CONFIG_ZMK_WATCHDOG_STUDIO_RPC`. See
+   "Split keyboard limitations" below.
+
 3. Open the [web UI](https://cormoran.github.io/zmk-feature-watchdog/) (or
    run it locally, see `web/README.md`) and connect over serial via ZMK
    Studio's WebSerial transport. The page shows:
+   - a **source selector**: "Central" (this device's own log) or
+     "Peripheral N" (a connected split peripheral's log, relayed over
+     `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY` -- see "Split keyboard limitations"
+     below);
    - a **status card**: capacity, stored count, dropped-since-boot, and a
      "recording paused" banner once the store is full (delete incidents to
      resume);
-   - an **incident table**: id, source (always "Central" in this phase),
-     type badge, boot ordinal + uptime, and a detail column decoded per
-     incident type (freeze queue name, fatal reason/PC/LR, reset-cause bits);
+   - an **incident table**: id, source ("Central" or "Peripheral N"), type
+     badge, boot ordinal + uptime, and a detail column decoded per incident
+     type (freeze queue name, fatal reason/PC/LR, reset-cause bits);
    - per-row **delete** and **delete all** (with confirmation);
-   - new incidents appear live via a push notification, without needing to
-     refresh.
+   - new local (Central) incidents appear live via a push notification,
+     without needing to refresh.
 
    Implementation reference:
    - `include/cormoran/zmk/watchdog.h` — incident record type + store/pending/detector API
@@ -108,8 +123,29 @@ For more info on modules, you can read through through the [Zephyr modules page]
    - `src/watchdog_reset_cause.c` — boot-time `hwinfo` reset-cause audit
    - `src/watchdog_inject.c` — dangerous test/fault injection helpers (`CONFIG_ZMK_WATCHDOG_TEST_INJECTION`, default n)
    - `proto/cormoran/watchdog/watchdog.proto` — message types (`Request`/`Response`/`Notification`)
-   - `src/studio/watchdog_handler.c` — firmware RPC handler (GetStatus/ListIncidents/DeleteIncidents)
+   - `src/studio/watchdog_request_exec.c` — request execution against the local store (shared by the RPC handler and the split relay responder)
+   - `src/studio/watchdog_handler.c` — firmware RPC handler (GetStatus/ListIncidents/DeleteIncidents), routes `source != 0` to the relay
+   - `src/split/watchdog_relay.c` — split relay bridge (peripheral responder + central proxy/notifications)
    - `web/src/App.tsx`, `web/src/IncidentsSection.tsx` — web UI
+
+### Split keyboard limitations
+
+- **Broadcast, not addressed**: the underlying split relay event transport
+  sends a central→peripheral request to *every* connected peripheral, not
+  to one addressed peripheral. With more than one peripheral, every
+  peripheral answers every relayed request (each correctly tagged with its
+  own source on the way back) -- fine for the common single-peripheral
+  split, but does not compose well with a UI that expects an answer from
+  only one specific peripheral.
+- **No connectivity discovery**: there is no RPC to ask "which peripherals
+  are currently connected." A relayed request to a disconnected/missing
+  peripheral simply never gets a response; the web UI times out after ~3s
+  and shows an error rather than hanging forever.
+- **Relaying is asynchronous**: unlike a local (Central) request, a
+  peripheral request always returns a `DeferredResponse` immediately and the
+  real answer arrives later as a `PeripheralResponse` Studio notification.
+  The web UI handles this automatically; if you build your own client
+  against this RPC surface, watch for `deferred` in the `Response` oneof.
 
 ### Flash-wear protection
 

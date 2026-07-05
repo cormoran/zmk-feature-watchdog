@@ -7,9 +7,15 @@ cormoran.watchdog.ErrorResponse.message           max_size:64
 cormoran.watchdog.FreezeDetail.queue_name         max_size:16
 cormoran.watchdog.FatalDetail.thread_name         max_size:16
 
-# Pagination: at most 4 incidents per ListIncidents response (see the
-# BUILD_ASSERT in src/studio/watchdog_handler.c for the size arithmetic).
-cormoran.watchdog.IncidentPageResponse.incidents  max_count:4
+# Pagination: at most 3 incidents per ListIncidents response (see the
+# BUILD_ASSERT in src/studio/watchdog_handler.c for the local-RPC-path size
+# arithmetic against CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE). Also shared by the
+# split relay path (src/split/watchdog_relay.c), where a RelayResponse
+# wrapping a full IncidentPageResponse must additionally fit under the split
+# relay transport's 255-byte hard ceiling -- 4 incidents would not (a
+# RelayResponse with 4 FatalDetail incidents encodes to ~284 bytes); 3 fits
+# comfortably (~220 bytes) with headroom for CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN.
+cormoran.watchdog.IncidentPageResponse.incidents  max_count:3
 
 # Delete-by-id batch size: generous enough to delete a handful of incidents
 # in one call without needing repeated round-trips; still small relative to

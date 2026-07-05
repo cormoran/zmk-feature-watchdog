@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import {
   createConnectedMockZMKApp,
   createMockZMKApp,
@@ -8,6 +8,7 @@ import {
   IncidentsSection,
   SUBSYSTEM_IDENTIFIER,
 } from "../src/IncidentsSection";
+import { sourceLabel } from "../src/incidentHelpers";
 
 describe("IncidentsSection Component", () => {
   describe("With Subsystem", () => {
@@ -48,6 +49,34 @@ describe("IncidentsSection Component", () => {
 
       expect(screen.getByText(/Incidents \(0\)/i)).toBeInTheDocument();
       expect(screen.getByText(/No incidents recorded/i)).toBeInTheDocument();
+    });
+
+    it("should offer a source selector defaulting to Central, and show the peripheral-relay hint when switched (DESIGN.md SS7)", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <IncidentsSection />
+        </ZMKAppProvider>
+      );
+
+      const select = screen.getByLabelText(/Source/i) as HTMLSelectElement;
+      expect(select.value).toBe("0");
+      expect(
+        screen.queryByText(/Peripheral incidents are relayed/i)
+      ).not.toBeInTheDocument();
+
+      fireEvent.change(select, { target: { value: "1" } });
+
+      expect(select.value).toBe("1");
+      expect(screen.getByText(sourceLabel(1))).toBeInTheDocument();
+      await waitFor(() => {
+        expect(
+          screen.getByText(/Peripheral incidents are relayed/i)
+        ).toBeInTheDocument();
+      });
     });
   });
 
