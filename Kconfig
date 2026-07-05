@@ -1,10 +1,37 @@
-config ZMK_WATCHDOG_FEATURE
+config ZMK_WATCHDOG
     bool "Enable firmware watchdog incident logging"
+    select SETTINGS
+    select CRC
+    select ZMK_LOW_PRIORITY_WORK_QUEUE
 
-if ZMK_WATCHDOG_FEATURE
+if ZMK_WATCHDOG
 
-config ZMK_WATCHDOG_FEATURE_STUDIO_RPC
+config ZMK_WATCHDOG_MAX_INCIDENTS
+    int "Maximum number of stored incidents (flash slot cap, per half)"
+    default 16
+    help
+      Flash-wear protection: once this many incidents are stored, recording
+      stops (no ring-buffer overwrite) until the user deletes incidents.
+
+config ZMK_WATCHDOG_PENDING_CONVERT_DELAY_MS
+    int "Delay before converting a pending incident at boot (ms)"
+    default 100
+    help
+      The pending-slot boot conversion needs the settings subsystem to have
+      finished settings_load() (called from main(), after every SYS_INIT
+      level runs). There is no "settings loaded" hook to wait on, so
+      conversion is instead scheduled on the low-priority work queue after
+      this delay, which comfortably follows main()'s settings_load() call
+      for the tiny number of keys this module and typical configs persist.
+
+config ZMK_WATCHDOG_STUDIO_RPC
     bool "Expose watchdog incident log via custom Studio RPC"
     depends on ZMK_STUDIO
+
+config ZMK_WATCHDOG_TEST
+    bool "Enable watchdog self-test (native_sim only)"
+    help
+      Adds test-only init logic exercising the store and pending-slot boot
+      conversion. Not for production builds.
 
 endif

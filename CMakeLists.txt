@@ -1,9 +1,14 @@
 zephyr_include_directories(include)
-if(CONFIG_ZMK_WATCHDOG_FEATURE)
-    # target_sources(app PRIVATE ...)
+if(CONFIG_ZMK_WATCHDOG)
+    target_sources(app PRIVATE src/watchdog_store.c)
+    target_sources(app PRIVATE src/watchdog_pending.c)
 
-    if(CONFIG_ZMK_WATCHDOG_FEATURE_STUDIO_RPC)
-        file(GLOB_RECURSE C_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)
+    if(CONFIG_ZMK_WATCHDOG_TEST)
+        target_sources(app PRIVATE src/test/watchdog_test.c)
+    endif()
+
+    if(CONFIG_ZMK_WATCHDOG_STUDIO_RPC)
+        file(GLOB_RECURSE C_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/studio/*.c)
         target_sources(app PRIVATE ${C_FILES})
 
         list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
