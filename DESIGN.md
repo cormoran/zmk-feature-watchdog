@@ -616,6 +616,35 @@ recovered with a battery pull) that the project owner decided to remove
 See §4.1 "Hardware fallback: prototyped and removed" for the full writeup;
 this module no longer offers any hardware-watchdog-backed fallback.
 
+**Post-removal re-test: the central-board hang is confirmed NOT caused by
+this module.** After removing `CONFIG_ZMK_WATCHDOG_HW_FALLBACK` (commit
+`4a23446`), two things were re-verified on hardware:
+
+- **Single board (Module Test)**: rebuilt/reflashed
+  `module_watchdog_board_test_injection` with the fix. `InjectTestRequest{FREEZE_KIND}`
+  and `{FATAL_KIND}` both still recorded correct incidents
+  (`queue_name: "sysworkq"`; `reason: 3`/`K_ERR_KERNEL_OOPS` with plausible
+  `pc`/`lr`) — the software-only `task_wdt` and fatal-handler paths are
+  completely unaffected by removing the hardware fallback, as expected.
+- **Central board (Abyss Tester XIAO)**: rebuilt `module_watchdog_split_central`
+  with the fix (no hardware watchdog ever armed — confirmed by reading
+  `subsys/task_wdt/task_wdt.c`: all hardware-watchdog activation is gated
+  behind `if (hw_wdt)`, and this module now always calls
+  `task_wdt_init(NULL)`) and reflashed the same physical board that had
+  previously hung. **It hung again, in the exact same place**
+  (`lfclk_spinwait()`, identical backtrace). This **falsifies** the
+  hardware-watchdog/LFCLK-handoff hypothesis as the cause of this specific
+  board's hang — with the hardware watchdog now structurally incapable of
+  ever being armed by this module, the hang still occurs, so something
+  else (most likely a genuinely marginal crystal/oscillator on this
+  specific physical unit, independent of any firmware this module
+  controls) is responsible. The `CONFIG_ZMK_WATCHDOG_HW_FALLBACK` removal
+  remains the right call regardless — it closed a real, credible risk
+  path even though it turned out not to be *this* board's problem — but
+  whoever resumes split hardware validation should not expect removing it
+  to have fixed the Abyss Tester XIAO board; a physical power cycle
+  (as before) is still the known, if unexplained, workaround.
+
 ## 13. Implementation phases (each = one subagent task)
 
 Phase A — **done** (commit "Initialize zmk-feature-watchdog from module
