@@ -106,24 +106,6 @@ config ZMK_WATCHDOG_FREEZE_TIMEOUT_MS
       stalls (BLE connection storms, settings flash writes) but short enough
       that a real freeze is noticed quickly.
 
-config ZMK_WATCHDOG_HW_FALLBACK
-    bool "Back the task watchdog with the hardware watchdog"
-    default y if !ARCH_POSIX
-    default n if ARCH_POSIX
-    select TASK_WDT_HW_FALLBACK
-    select WATCHDOG
-    help
-      Passes a real hardware watchdog device (devicetree alias
-      "watchdog0", or the first enabled node of a known watchdog
-      compatible) to task_wdt_init() so a hard lockup that prevents even
-      the task_wdt timer ISR from running (e.g. an IRQ storm) still resets
-      the chip. Not available/meaningful on native_sim (no hardware
-      watchdog device), so this defaults to n there.
-
-      Note (verified on this project's XIAO nRF52840 + J-Link rig): Zephyr's
-      task_wdt calls wdt_setup(..., WDT_OPT_PAUSE_HALTED_BY_DBG), so a J-Link
-      halt pauses the hardware watchdog and does not reset the board.
-
 endif # ZMK_WATCHDOG_FREEZE_DETECT
 
 config ZMK_WATCHDOG_FATAL_DETECT

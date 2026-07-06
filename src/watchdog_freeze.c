@@ -6,8 +6,6 @@
 
 #include <string.h>
 
-#include <zephyr/device.h>
-#include <zephyr/devicetree.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
@@ -84,32 +82,11 @@ static void watchdog_freeze_feed_work_handler(struct k_work *work) {
                                 K_MSEC(CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS / 4));
 }
 
-#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_HW_FALLBACK)
-/*
- * Hardware watchdog device used as a task_wdt fallback in case even the
- * task_wdt timer ISR can't run (hard lockup, IRQ storm). Mirrors Zephyr's
- * own subsys/task_wdt sample's node-selection fallback chain so this works
- * across boards without a per-board #ifdef here.
- */
-#if DT_NODE_HAS_STATUS_OKAY(DT_ALIAS(watchdog0))
-#define WATCHDOG_FREEZE_HW_WDT_NODE DT_ALIAS(watchdog0)
-#elif DT_HAS_COMPAT_STATUS_OKAY(nordic_nrf_wdt)
-#define WATCHDOG_FREEZE_HW_WDT_NODE DT_COMPAT_GET_ANY_STATUS_OKAY(nordic_nrf_wdt)
-#endif
-#endif /* CONFIG_ZMK_WATCHDOG_HW_FALLBACK */
-
 static int watchdog_freeze_init(void) {
-    const struct device *hw_wdt_dev = NULL;
-
-#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_HW_FALLBACK) && defined(WATCHDOG_FREEZE_HW_WDT_NODE)
-    hw_wdt_dev = DEVICE_DT_GET(WATCHDOG_FREEZE_HW_WDT_NODE);
-    if (!device_is_ready(hw_wdt_dev)) {
-        LOG_WRN("Hardware watchdog device not ready; task_wdt will run without HW fallback");
-        hw_wdt_dev = NULL;
-    }
-#endif
-
-    int ret = task_wdt_init(hw_wdt_dev);
+    /* Software-only task watchdog: no hardware watchdog peripheral backs
+     * this. See DESIGN.md SS4.1 for why a hardware fallback was prototyped
+     * and then deliberately removed. */
+    int ret = task_wdt_init(NULL);
     if (ret < 0) {
         LOG_ERR("task_wdt_init failed: %d", ret);
         return ret;

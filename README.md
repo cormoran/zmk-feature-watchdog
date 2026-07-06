@@ -66,9 +66,6 @@ For more info on modules, you can read through through the [Zephyr modules page]
    # reference. Disable individually if you don't want a given detector.
    CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y
    CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS=5000
-   # Hardware watchdog fallback (nRF wdt0 or board's "watchdog0" alias).
-   # Defaults to y on real boards, n on native_sim.
-   CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
    CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
 
    # Enable custom Studio RPC + web UI. Studio RPC only exists on the
@@ -84,6 +81,18 @@ For more info on modules, you can read through through the [Zephyr modules page]
    application code in your build also defines that symbol, one of the two
    definitions silently wins at link time (no compile error) -- only one
    fatal handler can be active.
+
+   **Why there's no hardware-watchdog-peripheral option**: freeze detection
+   above is a *software* timer only (Zephyr's task watchdog) -- it does not
+   arm the chip's real hardware watchdog peripheral, and this module does not
+   offer that as an option. This was tried and deliberately backed out: on
+   the nRF52840, once the hardware watchdog peripheral has been armed, it
+   keeps running across a soft/debugger reset (only a full power cycle clears
+   it), and while it's running it can prevent the chip's low-frequency clock
+   from ever finishing startup on the next boot -- hanging the keyboard
+   before firmware even starts, recoverable only by removing the battery.
+   The software-only timer used here does not have this failure mode, so it
+   remains the only freeze-detection mechanism this module provides.
 
    **Split keyboards**: enable `CONFIG_ZMK_WATCHDOG=y` on *both* halves so
    each detects and stores its own incidents. `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`

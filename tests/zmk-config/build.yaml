@@ -10,13 +10,13 @@ include:
     # the Studio RPC TX path is a genuine streaming ring buffer that never
     # needs a whole IncidentPage response to fit in one buffer (DESIGN.md
     # SS7.2).
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
     snippet: studio-rpc-usb-uart
 
   - artifact: module_watchdog_board_without_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y
+    cmake-args: -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
 
   # Dedicated test-injection build (DESIGN.md SS4.4/SS12): proves
   # CONFIG_ZMK_WATCHDOG_TEST_INJECTION (+ its RPC wiring in
@@ -32,7 +32,7 @@ include:
     shield: tester_xiao
     # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE: see the module_watchdog_board_with_rpc
     # comment above.
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_HW_FALLBACK=y -DCONFIG_ZMK_WATCHDOG_TEST_INJECTION=y
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_TEST_INJECTION=y
     snippet: studio-rpc-usb-uart
 
   - artifact: custom_settings_board

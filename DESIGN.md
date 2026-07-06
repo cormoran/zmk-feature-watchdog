@@ -41,9 +41,11 @@ Requirements from the project owner:
 - Per-peripheral addressing of relay messages (the relay broadcasts to all
   peripherals; responses carry a `source` slot so the central can tell them
   apart).
-- Detecting freezes of the BLE controller/radio itself (if the whole CPU
-  locks up, the **hardware watchdog fallback** still resets and we log a
-  degraded "hardware reset, no detail" incident from the reset cause).
+- Detecting freezes of the BLE controller/radio itself, or any hard lockup
+  that prevents even the task_wdt timer ISR from running (e.g. an IRQ
+  storm): a hardware-watchdog-peripheral backstop for this was prototyped
+  and then removed (§4.1) due to a reset-survival risk on the nRF52840; this
+  category of failure is simply not covered in v1.
 
 ## 3. Big picture
 
@@ -74,8 +76,9 @@ proxies read/delete requests to peripherals on demand.
 Use Zephyr's task watchdog (`subsys/task_wdt`,
 `include/zephyr/task_wdt/task_wdt.h`):
 
-- `task_wdt_init(hw_wdt)` — pass the nRF `wdt0` device when
-  `ZMK_WATCHDOG_HW_FALLBACK` is enabled (real boards), `NULL` on native_sim.
+- `task_wdt_init(NULL)` — always software-only, no hardware watchdog
+  peripheral backing it. See "Hardware fallback: prototyped and removed"
+  below for why.
 - One `task_wdt_add(timeout, callback, user_data)` **channel per monitored
   work queue**. Feeding is done by a self-rescheduling `k_work_delayable`
   submitted **to the monitored queue**: if the queue is blocked/starved
@@ -95,18 +98,43 @@ Use Zephyr's task watchdog (`subsys/task_wdt`,
 - The task_wdt callback runs in **ISR (timer) context**: it must only fill
   the retained-RAM pending record (freeze detail: channel id, queue name,
   uptime, boot count) and call `sys_reboot(SYS_REBOOT_WARM)`.
-- **Hardware WDT fallback** (`CONFIG_TASK_WDT_HW_FALLBACK`, nRF `wdt0`):
-  if even the task_wdt timer ISR can't run (hard lockup, IRQ storm), the
-  hardware watchdog resets the chip. No retained record is written in that
-  case — the next boot logs a degraded incident from the reset cause (§4.3).
-- **Debugger interaction (important on this rig): verified safe.** This
-  tree's `task_wdt` calls `wdt_setup(hw_wdt_dev, WDT_OPT_PAUSE_HALTED_BY_DBG)`
-  (`zephyr/subsys/task_wdt/task_wdt.c:181`), so a J-Link halt pauses the
-  hardware WDT. `CONFIG_ZMK_WATCHDOG_HW_FALLBACK` still exists so builds
-  can disable the HW layer independently of software freeze detection.
-  Note: the *software* task_wdt timer still fires during long halts —
-  expect a spurious FREEZE incident after resuming from a multi-second
-  breakpoint; that's acceptable for a debug rig.
+- **Debugger interaction on this rig**: a J-Link halt pauses this software
+  timer's ISR along with everything else, but expect a spurious FREEZE
+  incident after resuming from a multi-second breakpoint; that's acceptable
+  for a debug rig.
+
+**Hardware fallback: prototyped and removed.** An earlier version of this
+design (and an earlier revision of this module, up to and including Phase F)
+passed a real hardware watchdog device (nRF `wdt0` / devicetree
+`watchdog0` alias) to `task_wdt_init()` as `CONFIG_ZMK_WATCHDOG_HW_FALLBACK`,
+so that a hard lockup that prevents even the task_wdt timer ISR from running
+(e.g. an IRQ storm) would still reset the chip via `CONFIG_TASK_WDT_HW_FALLBACK`.
+This was removed entirely (not kept as an opt-in) after hardware validation
+(§12.1) turned up a credible, serious reset-survival risk:
+
+- The nRF52840's hardware watchdog peripheral, once armed, is **not**
+  cleared by a soft reset or debugger/pin reset — only a real power-on/
+  brown-out reset clears it.
+- Zephyr's LFCLK driver (`drivers/clock_control/clock_control_nrf.c`) does a
+  **one-shot** RC→XTAL clock handoff at boot: it attempts the switch to the
+  external crystal exactly once and never retries. Analysis of that driver
+  (see §12.1) found a plausible mechanism by which a *still-armed* hardware
+  watchdog from a previous boot can interfere with this handoff on the next
+  boot if the board is reset via SWD/software rather than fully power-cycled.
+- The failure mode this produces is a **permanent boot hang** inside
+  `lfclk_spinwait()`, before firmware logic (including this module's own
+  code) ever runs — recoverable only by a real power cycle (battery pull).
+  This was not proven end-to-end with full certainty (the hardware
+  experiment that surfaced it had some methodology confounds — see §12.1),
+  but the mechanism is credible and directly backed by reading the
+  clock-control driver source.
+- Given that, the project owner judged the downside (a "reliability"
+  feature that can itself turn a recoverable freeze into an unrecoverable
+  hang requiring a battery pull) worse than the value a hardware backstop
+  adds on top of the software task_wdt layer, and decided to drop
+  `CONFIG_ZMK_WATCHDOG_HW_FALLBACK` entirely rather than keep it as a
+  risky opt-in. No hardware-watchdog option remains in this module; only
+  the software task_wdt mechanism described above is used.
 
 ### 4.2 Fatal errors (hard fault, stack overflow, oops/panic)
 
@@ -406,7 +434,6 @@ registration expectations if config names appear there.
 | `ZMK_WATCHDOG` | n | core: store + boot hook + reset-cause audit |
 | `ZMK_WATCHDOG_FREEZE_DETECT` | y if ZMK_WATCHDOG | task_wdt monitor (selects `TASK_WDT`) |
 | `ZMK_WATCHDOG_FREEZE_TIMEOUT_MS` | 5000 | freeze threshold |
-| `ZMK_WATCHDOG_HW_FALLBACK` | y (n on native_sim) | hardware WDT backing (`TASK_WDT_HW_FALLBACK`) |
 | `ZMK_WATCHDOG_FATAL_DETECT` | y if ZMK_WATCHDOG | fatal-handler override |
 | `ZMK_WATCHDOG_MAX_INCIDENTS` | 16 | flash slot cap (per half) |
 | `ZMK_WATCHDOG_STUDIO_RPC` | y if ZMK_STUDIO && ZMK_WATCHDOG | RPC subsystem (central) |
@@ -468,10 +495,12 @@ JLinkExe `savebin`, RTT control-block zeroing before reflash,
 4. Repeat until cap → `status.recording_stopped=true`, further injections
    only bump `dropped_since_boot`.
 5. `delete all` → recording resumes.
-6. WDT-vs-debugger sanity: J-Link halt while HW fallback on — confirm
-   expected behavior per §4.1 decision.
-7. Web UI smoke test if a browser is available; otherwise the pyusb CLI
+6. Web UI smoke test if a browser is available; otherwise the pyusb CLI
    (`tools/zmk-studio-rpc custom-call`) covers the RPC surface.
+
+(A hardware-watchdog-vs-debugger sanity check previously appeared here; it
+no longer applies now that the hardware fallback has been removed — see §4.1
+"Hardware fallback: prototyped and removed" and §12.1.)
 
 Split relay on real hardware was attempted once this rig grew a second board
 (see §12.1) but was not completed; native_sim/relay unit tests + split build
@@ -563,6 +592,29 @@ whoever picks this up**: start with a fresh physical power cycle of the
 Abyss Tester XIAO board before flashing anything, and confirm plain
 `core.get_device_info` over Studio RPC works *before* layering the
 watchdog-specific relay checks on top.
+
+**Follow-up conclusion (post-Phase-F): `lfclk_spinwait()` hang traced to a
+plausible interaction with `CONFIG_ZMK_WATCHDOG_HW_FALLBACK`, feature
+removed.** A code-analysis pass (over `drivers/clock_control/clock_control_nrf.c`)
+investigating this central-board hang found a credible mechanism connecting
+it to this module's (now-removed) hardware-watchdog fallback: the
+nRF52840's hardware watchdog peripheral survives soft/debugger/pin resets
+(only POR/BOR clears it), and the LFCLK driver's RC→XTAL clock handoff is
+one-shot (attempted once at boot, never retried). If a prior boot had armed
+the hardware watchdog (via `CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y`) and the board
+was then reset other than by a full power cycle, the still-running old
+watchdog could plausibly block the LFCLK handoff on the next boot, hanging
+the board forever in `lfclk_spinwait()` — matching what was observed on the
+central board above. This was **not proven with full certainty** end-to-end
+(this session's hardware experiment had methodology confounds — notably, the
+user's physical power cycle mid-session, which per this mechanism should
+have been the fix, is also consistent with several other explanations for a
+marginal-crystal condition), but the mechanism is well-supported by the
+driver source and the downside is severe enough (a device that can only be
+recovered with a battery pull) that the project owner decided to remove
+`CONFIG_ZMK_WATCHDOG_HW_FALLBACK` entirely rather than keep it as an opt-in.
+See §4.1 "Hardware fallback: prototyped and removed" for the full writeup;
+this module no longer offers any hardware-watchdog-backed fallback.
 
 ## 13. Implementation phases (each = one subagent task)
 

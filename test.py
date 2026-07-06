@@ -80,18 +80,21 @@ class WestCommandsTests(unittest.TestCase):
                         # is on, on a real (non-native_sim) board.
                         "CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y",
                         "CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y",
-                        "CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y",
                         "CONFIG_TASK_WDT=y",
-                        "CONFIG_TASK_WDT_HW_FALLBACK=y",
+                        # CONFIG_TASK_WDT_HW_FALLBACK defaults to y upstream
+                        # whenever CONFIG_TASK_WDT=y, regardless of our own
+                        # (removed) Kconfig -- but src/watchdog_freeze.c
+                        # always calls task_wdt_init(NULL), so the hardware
+                        # watchdog code in subsys/task_wdt/task_wdt.c (all
+                        # gated behind `if (hw_wdt)`) never actually runs.
+                        # Not asserting its absence here since it's an inert
+                        # upstream default, not something this module
+                        # controls or that indicates a regression.
                         # DESIGN.md SS7.2: the Studio RPC TX path never needs
                         # to be raised above its framework default.
                         "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=64",
                     ],
-                    device=[
-                        # xiao_ble's nRF52840 wdt0 node, used as the task_wdt
-                        # hardware fallback device.
-                        "DT_COMPAT_HAS_OKAY_nordic_nrf_wdt",
-                    ],
+                    device=[],
                 ),
                 "module_watchdog_board_without_rpc": ConfigAndDeviceTree(
                     config=[
@@ -100,15 +103,12 @@ class WestCommandsTests(unittest.TestCase):
                         NotFound("CONFIG_ZMK_WATCHDOG_STUDIO_RPC"),
                         "CONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y",
                         "CONFIG_ZMK_WATCHDOG_FATAL_DETECT=y",
-                        "CONFIG_ZMK_WATCHDOG_HW_FALLBACK=y",
                         # Test injection is dangerous and must default off,
                         # even on a build that otherwise enables every other
                         # detector.
                         NotFound("CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y"),
                     ],
-                    device=[
-                        "DT_COMPAT_HAS_OKAY_nordic_nrf_wdt",
-                    ],
+                    device=[],
                 ),
                 # Dedicated test-injection build (DESIGN.md SS4.4/SS12): the
                 # only artifact with CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y,
