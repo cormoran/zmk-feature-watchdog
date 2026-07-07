@@ -785,6 +785,21 @@ accumulated during this investigation (GDB-attach as a crash confound,
 etc.), and treat "does the handler body even run its real logic" as a
 check to make before "is the transport reliable."
 
+**Follow-up: all three relay request types confirmed on hardware.**
+Same session, immediately after the fix above. `ListIncidents{source:1}`
+(peripheral had 0 stored incidents after an NVS erase -- exercises the
+same `stream_incident_page()`/chunked-response code path with a
+zero-incident page) and `DeleteIncidents{source:1, all:false, ids:[]}`
+(a safe no-op -- exercises the `DeleteResult` relay-response branch) each
+round-tripped correctly 3/3 times, alongside 2 more `GetStatus` repeats.
+`InjectTestRequest` has no `source` field and by design can never be
+relayed (DESIGN.md/`watchdog_handler.c`'s `request_source()`: it always
+executes locally) -- so a real, non-empty `ListIncidents` page cannot be
+produced on a peripheral via any Studio RPC path without deliberately
+crashing it; that data-bearing branch of the chunk-building logic
+remains native_sim-only coverage, which is sufficient since it's pure
+protobuf encoding with no relay/BLE-specific behavior of its own.
+
 ## 13. Implementation phases (each = one subagent task)
 
 Phase A — **done** (commit "Initialize zmk-feature-watchdog from module
