@@ -19,13 +19,13 @@ This module includes:
 
 On a split keyboard, each half detects and stores its own incidents
 locally (this part is hardware-verified). The central can additionally
-*try* to proxy read/delete requests to a connected peripheral's own
-incident log over ZMK's split relay event mechanism
-(`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`, see DESIGN.md SS7/SS12.1 and
-`src/split/watchdog_relay.c`) -- select "Peripheral N" as the source in the
-web UI's status card. **This relay proxy is EXPERIMENTAL and disabled by
-default** (see "Split keyboard limitations" below) -- hardware testing
-could not get a relayed request to complete end-to-end.
+proxy read/delete requests to a connected peripheral's own incident log
+over ZMK's split relay event mechanism (`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`,
+see DESIGN.md SS7/SS12.1 and `src/split/watchdog_relay.c`) -- select
+"Peripheral N" as the source in the web UI's status card. **This relay
+proxy is hardware-verified end-to-end (DESIGN.md SS12.1) and enabled by
+default on split builds** (see "Split keyboard limitations" below for its
+remaining constraints).
 
 ## More Info
 
@@ -143,18 +143,13 @@ For more info on modules, you can read through through the [Zephyr modules page]
 
 ### Split keyboard limitations
 
-- **The relay proxy (`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`) is experimental and
-  off by default.** Local (Central-only) incident logging is fully
-  hardware-verified and does not depend on this option at all -- both
-  halves of a split keyboard detect and store their own incidents
-  correctly regardless. Only *viewing a peripheral's log from the
-  central's web UI* needs this flag, and hardware testing (DESIGN.md
-  SS12.1) could not get that round-trip to complete even once, across
-  many repeated attempts (fresh pairing, 60+ seconds of stable
-  connection, before/after reconnects) -- the central always accepts the
-  request and returns a `DeferredResponse`, but the `PeripheralResponse`
-  notification never arrived. If you enable it anyway, expect it to not
-  work; a request with a nonzero `source` will just leave the UI waiting.
+- **The relay proxy (`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`) is hardware-verified
+  end-to-end** (DESIGN.md SS12.1, 2026-07-07): a relayed request completes
+  correctly, with the central's `DeferredResponse` followed by a real
+  `PeripheralResponse` Studio notification. Local (Central-only) incident
+  logging does not depend on this option at all -- both halves of a split
+  keyboard detect and store their own incidents correctly regardless of
+  whether relaying is enabled.
 - **Broadcast, not addressed**: the underlying split relay event transport
   sends a central→peripheral request to *every* connected peripheral, not
   to one addressed peripheral. With more than one peripheral, every

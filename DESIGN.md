@@ -744,6 +744,47 @@ in this repo; if this crash becomes a practical problem for a real user
 override with fresh eyes on the "why doesn't my override apply" puzzle
 first.
 
+**Split relay round-trip: root cause found, fixed, verified working
+end-to-end (2026-07-07) -- supersedes "still not verified" above,
+`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY` restored to `default y if ZMK_SPLIT`.**
+None of the timing/connection theories chased in this session's earlier
+investigation (BLE controller radio-timing assertions, a global relay
+chunk-sequence exhausting the ATT buffer pool, a peripheral BLE-init
+hang) turned out to be the actual blocker for a *hands-off* run. The real
+bug: `src/split/watchdog_relay.c`'s `watchdog_relay_process_work_handler()`
+(peripheral role) still contained diagnostic scaffolding from an earlier
+crash-bisection session -- a `printk()` followed by an unconditional
+`return` placed *before* the call to `watchdog_relay_exec_request()`.
+The peripheral had been silently no-op'ing on every relay request; it
+never built or sent a response, so the central's wait always timed out.
+This was invisible in every debugging technique tried (GDB, RTT
+snapshots, non-halting SWD polling) because none of them were pointed at
+"does the peripheral's handler body run at all" -- they were all chasing
+*why the response doesn't arrive*, when the actual answer was "no
+response is ever built." Found by direct code reading while adding
+unrelated diagnostic counters, not by hardware tracing.
+
+Fixed by restoring the real handler body (calls
+`watchdog_relay_exec_request()` -> `stream_incident_page()` or
+`response_to_relay_non_list_response()` -> `raise_relay_response()`) and
+removing the diagnostic code. Verified via `relay_query.py` against real
+hardware (Module Test peripheral, Abyss Tester XIAO central, both
+NVS-erased and freshly paired): 8/9 `GetStatus{source: 1}` relay
+round-trips succeeded end-to-end (`PeripheralResponse` notification with
+`status.capacity: 16` matching the dispatched `request_id`); the one miss
+was the very first request immediately after a fresh pairing, a known
+"connection not yet settled" transient, not a recurrence. `python3 -m
+unittest` (unit + build tests) passes.
+
+Lesson for future hardware-debugging sessions in this repo: when a
+round-trip mysteriously never completes, grep the suspect file for
+leftover `printk`/early-`return` diagnostic scaffolding *before*
+spending hours on timing/connection hypotheses -- see
+`skills/debug-zmk-split/SKILL.md` for the broader methodology notes
+accumulated during this investigation (GDB-attach as a crash confound,
+etc.), and treat "does the handler body even run its real logic" as a
+check to make before "is the transport reliable."
+
 ## 13. Implementation phases (each = one subagent task)
 
 Phase A — **done** (commit "Initialize zmk-feature-watchdog from module

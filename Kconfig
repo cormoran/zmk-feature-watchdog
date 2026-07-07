@@ -43,28 +43,24 @@ config ZMK_WATCHDOG_PROTOBUF
     imply NANOPB_NO_ENCODE_SIZE_CHECK
 
 config ZMK_WATCHDOG_SPLIT_RELAY
-    bool "Relay watchdog Studio RPC to split peripherals (EXPERIMENTAL, opt-in)"
-    default n
+    bool "Relay watchdog Studio RPC to split peripherals"
+    default y if ZMK_SPLIT
     depends on ZMK_SPLIT_RELAY_EVENT
     select ZMK_WATCHDOG_PROTOBUF
     help
-      EXPERIMENTAL, default off: hardware testing (DESIGN.md SS12.1) could
-      not get a relayed request to complete end-to-end on real split
-      hardware -- the central always accepts the request and returns a
-      DeferredResponse, but no PeripheralResponse notification was ever
-      observed to arrive, across many repeated attempts under varied
-      conditions (immediately after pairing, after 60+ seconds of stable
-      connection, before/after reconnects). The root cause was not
-      isolated (ruled out: wrong relay source tagging, GATT-discovery
-      race, and the peripheral simply being mid-crash-reboot). Peripherals
-      still detect and store incidents in their own local flash correctly
-      either way -- only *reading that log from the central* is affected.
-      Enable this only to continue investigating; do not rely on it in a
-      shipped configuration until the round-trip has been verified working
-      on real hardware.
+      Verified end-to-end on real split hardware (DESIGN.md SS12.1,
+      2026-07-07): a relayed GetStatus request completes correctly, with
+      the central's DeferredResponse followed by a PeripheralResponse
+      Studio notification carrying the peripheral's real answer.
+      Previous hardware sessions could not get a relayed request to
+      complete and shipped this default off while investigating; the
+      actual cause turned out to be leftover diagnostic code in this
+      module (an early `return` before the peripheral ever executed the
+      request), not a transport or timing issue -- see DESIGN.md SS12.1
+      for the full writeup.
 
-      When it does work as designed: enable on BOTH halves of a split
-      keyboard to reach a peripheral's own incident log through the
+      Enable on BOTH halves of a split keyboard to reach a peripheral's
+      own incident log through the
       central's cormoran__watchdog Studio RPC subsystem: any GetStatus/
       ListIncidents/DeleteIncidents request with a nonzero `source` is
       relayed to the matching peripheral over CONFIG_ZMK_SPLIT_RELAY_EVENT,
@@ -99,6 +95,22 @@ config ZMK_WATCHDOG_SPLIT_RELAY_TEST
           returns a DeferredResponse with a distinct, nonzero request_id.
       Not for production builds.
 
+config ZMK_WATCHDOG_SPLIT_RELAY_TEST_DELAY_MS
+    int "Delay this self-test's boot-time run (ms)"
+    default 0
+    depends on ZMK_WATCHDOG_SPLIT_RELAY_TEST
+    help
+      Both test hooks normally run synchronously inside a SYS_INIT at
+      APPLICATION priority, at the same moment BLE scanning/pairing/GATT
+      discovery are starting. Setting this above 0 defers the test (via a
+      k_work_delayable on the system workqueue) by that many ms instead --
+      purely for A/B hardware experiments isolating whether running
+      *anything* at this exact boot moment (as opposed to this specific
+      test's own logic, which never touches the real BLE transport --
+      see the test's own doc comment) affects radio-scheduling stability.
+      Not expected to matter in itself; kept at 0 unless actively testing
+      that hypothesis (DESIGN.md SS12.1).
+
 config ZMK_WATCHDOG_FREEZE_DETECT
     bool "Detect long thread/work-queue freezes via Zephyr's task watchdog"
     default y
@@ -117,9 +129,63 @@ config ZMK_WATCHDOG_FREEZE_TIMEOUT_MS
     default 5000
     help
       task_wdt channel timeout for each monitored work queue. The feed period
-      is this value divided by 4. Keep this well above worst-case legitimate
-      stalls (BLE connection storms, settings flash writes) but short enough
-      that a real freeze is noticed quickly.
+      is this value divided by CONFIG_ZMK_WATCHDOG_FREEZE_FEED_DIVISOR. Keep
+      this well above worst-case legitimate stalls (BLE connection storms,
+      settings flash writes) but short enough that a real freeze is noticed
+      quickly.
+
+config ZMK_WATCHDOG_FREEZE_FEED_DIVISOR
+    int "Feed period divisor (feed period = timeout / this)"
+    default 2
+    range 2 10
+    help
+      Each monitored queue's feed work is a k_work_delayable that
+      re-schedules itself every (CONFIG_ZMK_WATCHDOG_FREEZE_TIMEOUT_MS /
+      this) ms, which under the hood is backed by its own Zephyr k_timer.
+      Lowering this divisor (default 2, meaning "feed twice as often as the
+      timeout") reduces how often that timer fires while staying safely
+      inside the timeout window. A lower feed *frequency* is a mitigation
+      (not a fix) for a real, hardware-confirmed, low-probability BLE
+      controller radio-timing issue on split-central builds: any extra
+      periodic k_timer activity from this module is one more thing that can
+      occasionally coincide with the BLE controller's own extremely tight
+      (~275us) radio-event-preparation timing budget, tripping Zephyr's own
+      LL_ASSERT_OVERHEAD safety check and rebooting -- see DESIGN.md SS12.1.
+      This does not eliminate that risk (it is architecturally outside this
+      module's control -- the LLL radio ISR runs at the highest interrupt
+      priority and this module cannot delay it directly), it only reduces
+      how often this module contributes extra timer load that could
+      coincide with it.
+
+config ZMK_WATCHDOG_FREEZE_STARTUP_DELAY_MS
+    int "Delay before arming the freeze detector after boot (ms)"
+    default 0
+    help
+      task_wdt_init()/task_wdt_add() and this module's own feed timers
+      normally start synchronously inside a SYS_INIT at APPLICATION
+      priority -- i.e. at the same moment the BLE stack is bringing up
+      scanning/pairing/GATT discovery, the busiest and most tightly
+      scheduled period for the radio (DESIGN.md SS12.1). Setting this above
+      0 defers arming (via a k_work_delayable on the system workqueue) by
+      that many ms, so this module's own periodic timer activity doesn't
+      begin until initial connection establishment has settled down. This
+      delays freeze detection coverage by the same amount (a real freeze
+      during the delay window goes undetected) and is an experimental
+      mitigation, not a proven fix -- see DESIGN.md SS12.1 for the hardware
+      test that motivated it and its (inconclusive) result.
+
+config ZMK_WATCHDOG_FREEZE_MONITOR_LOWPRIO_QUEUE
+    bool "Also monitor ZMK's low-priority work queue"
+    default y
+    help
+      In addition to the system workqueue (always monitored -- key event
+      processing lives there, see DESIGN.md SS4.1), also arm a task_wdt
+      channel + feed timer for ZMK's low-priority work queue. Disabling this
+      halves this module's own periodic k_timer footprint (see
+      CONFIG_ZMK_WATCHDOG_FREEZE_FEED_DIVISOR's help for why that matters on
+      split-central builds), at the cost of no longer detecting freezes that
+      are specific to the low-priority queue alone (freezes on the system
+      workqueue, the more critical case, are still caught either way).
 
 endif # ZMK_WATCHDOG_FREEZE_DETECT
 

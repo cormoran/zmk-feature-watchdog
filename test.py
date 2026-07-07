@@ -187,6 +187,13 @@ class WestCommandsTests(unittest.TestCase):
                         # verify they stay at the framework defaults.
                         "CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE=64",
                         "CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN=128",
+                        # DESIGN.md SS12.1: the split-central snippet trims
+                        # this module's own periodic timer footprint (a
+                        # mitigation for the hardware-observed
+                        # LL_ASSERT_OVERHEAD collision), so verify it's
+                        # actually wired up rather than silently no-op'd.
+                        "# CONFIG_ZMK_WATCHDOG_FREEZE_MONITOR_LOWPRIO_QUEUE is not set",
+                        "CONFIG_ZMK_WATCHDOG_FREEZE_FEED_DIVISOR=2",
                     ],
                     device=[],
                 ),

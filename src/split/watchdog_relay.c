@@ -68,6 +68,7 @@
 #include <zephyr/settings/settings.h>
 #include <zephyr/sys/util.h>
 #include <zmk/event_manager.h>
+#include <zmk/workqueue.h>
 
 /* ZMK_RELAY_EVENT_CENTRAL_TO_PERIPHERAL() (invoked below) expands to a call
  * to zmk_split_central_send_relay_event() but -- unlike the peripheral
@@ -304,21 +305,26 @@ static void stream_incident_page(uint32_t request_id,
     }
 }
 
-static int on_watchdog_relay_request(const zmk_event_t *eh) {
-    const struct zmk_watchdog_relay_request *ev = as_zmk_watchdog_relay_request(eh);
-    if (!ev) {
-        return 0;
-    }
+/* watchdog_relay_exec_request() (flash/settings access, protobuf encode)
+ * runs on ZMK's low-priority work queue instead of directly on whatever
+ * thread raises zmk_watchdog_relay_request (the system workqueue), to avoid
+ * contention with other system-workqueue-driven BLE/event work. The event's
+ * payload must be copied out here -- eh/ev do not outlive this listener
+ * call. */
+static struct zmk_watchdog_relay_request watchdog_relay_pending_request;
 
+static void watchdog_relay_process_work_handler(struct k_work *work) {
     uint32_t request_id;
     cormoran_watchdog_Response resp;
-    if (watchdog_relay_exec_request(ev->payload, ev->size, &request_id, &resp) < 0) {
-        return 0;
+    int ret = watchdog_relay_exec_request(watchdog_relay_pending_request.payload,
+                                           watchdog_relay_pending_request.size, &request_id, &resp);
+    if (ret < 0) {
+        return;
     }
 
     if (resp.which_response_type == cormoran_watchdog_Response_incident_page_tag) {
         stream_incident_page(request_id, &resp.response_type.incident_page);
-        return 0;
+        return;
     }
 
     cormoran_watchdog_RelayResponse relay_resp =
@@ -328,6 +334,18 @@ static int on_watchdog_relay_request(const zmk_event_t *eh) {
     response_to_relay_non_list_response(&resp, &relay_resp.relay_response_type.response);
 
     raise_relay_response(&relay_resp);
+}
+
+K_WORK_DEFINE(watchdog_relay_process_work, watchdog_relay_process_work_handler);
+
+static int on_watchdog_relay_request(const zmk_event_t *eh) {
+    const struct zmk_watchdog_relay_request *ev = as_zmk_watchdog_relay_request(eh);
+    if (!ev) {
+        return 0;
+    }
+
+    watchdog_relay_pending_request = *ev;
+    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &watchdog_relay_process_work);
     return 0;
 }
 
@@ -556,26 +574,33 @@ static void handle_incident_chunk(uint32_t source, uint32_t request_id,
     chunk_accumulator.active = false;
 }
 
-static int on_watchdog_relay_response(const zmk_event_t *eh) {
-    const struct zmk_watchdog_relay_response *ev = as_zmk_watchdog_relay_response(eh);
-    if (!ev) {
-        return 0;
-    }
+/* Deferred to ZMK's low-priority work queue for the same reason as the
+ * peripheral-side request handler (see watchdog_relay_process_work_handler
+ * above): move the pb_decode + dispatch off whatever thread raises
+ * zmk_watchdog_relay_response (the system workqueue) and onto a dedicated
+ * lower-priority thread/stack, in case contention with other
+ * system-workqueue-driven BLE/event work is a factor. The event's payload
+ * must be copied out of the listener -- eh/ev do not outlive that call. */
+static struct zmk_watchdog_relay_response watchdog_relay_pending_response;
 
+static void watchdog_relay_response_process_work_handler(struct k_work *work) {
     cormoran_watchdog_RelayResponse relay_resp = cormoran_watchdog_RelayResponse_init_zero;
-    pb_istream_t istream = pb_istream_from_buffer(ev->payload, ev->size);
+    pb_istream_t istream = pb_istream_from_buffer(watchdog_relay_pending_response.payload,
+                                                   watchdog_relay_pending_response.size);
     if (!pb_decode(&istream, cormoran_watchdog_RelayResponse_fields, &relay_resp)) {
         LOG_WRN("Failed to decode watchdog relay response: %s", PB_GET_ERROR(&istream));
-        return 0;
+        return;
     }
 
-    /* ev->source was rewritten by ZMK_RELAY_EVENT_HANDLE's receive-side
+    uint32_t source = watchdog_relay_pending_response.source;
+
+    /* source was rewritten by ZMK_RELAY_EVENT_HANDLE's receive-side
      * `source_field_name = ev->source + 1` to the relaying peripheral's
      * slot + 1 -- exactly the addressing convention this module documents
      * for `source` elsewhere (0 = local/central, N = peripheral slot N). */
     switch (relay_resp.which_relay_response_type) {
     case cormoran_watchdog_RelayResponse_incident_chunk_tag:
-        handle_incident_chunk(ev->source, relay_resp.request_id,
+        handle_incident_chunk(source, relay_resp.request_id,
                               &relay_resp.relay_response_type.incident_chunk);
         break;
     case cormoran_watchdog_RelayResponse_response_tag: {
@@ -602,14 +627,25 @@ static int on_watchdog_relay_response(const zmk_event_t *eh) {
             resp.response_type.error = rnl->relay_non_list_response_type.error;
             break;
         }
-        raise_peripheral_response_notification(ev->source, relay_resp.request_id, &resp);
+        raise_peripheral_response_notification(source, relay_resp.request_id, &resp);
         break;
     }
     default:
         LOG_WRN("Watchdog relay response with no relay_response_type set");
         break;
     }
+}
 
+K_WORK_DEFINE(watchdog_relay_response_process_work, watchdog_relay_response_process_work_handler);
+
+static int on_watchdog_relay_response(const zmk_event_t *eh) {
+    const struct zmk_watchdog_relay_response *ev = as_zmk_watchdog_relay_response(eh);
+    if (!ev) {
+        return 0;
+    }
+
+    watchdog_relay_pending_response = *ev;
+    k_work_submit_to_queue(zmk_workqueue_lowprio_work_q(), &watchdog_relay_response_process_work);
     return 0;
 }
 
@@ -910,7 +946,26 @@ static int watchdog_split_relay_test_init(void) {
     return 0;
 }
 
-SYS_INIT(watchdog_split_relay_test_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+static struct k_work_delayable watchdog_split_relay_test_delayed_work;
+
+static void watchdog_split_relay_test_delayed_work_handler(struct k_work *work) {
+    watchdog_split_relay_test_init();
+}
+
+static int watchdog_split_relay_test_delayed_init(void) {
+    /* See CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST_DELAY_MS's Kconfig help:
+     * defers this boot-time self-test off the SYS_INIT/APPLICATION-priority
+     * critical path, for A/B hardware experiments only -- the test itself
+     * never touches the real BLE transport (see the file-level doc comment
+     * above), so this is not expected to change anything on its own. */
+    k_work_init_delayable(&watchdog_split_relay_test_delayed_work,
+                           watchdog_split_relay_test_delayed_work_handler);
+    k_work_schedule(&watchdog_split_relay_test_delayed_work,
+                     K_MSEC(CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST_DELAY_MS));
+    return 0;
+}
+
+SYS_INIT(watchdog_split_relay_test_delayed_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
 
 #endif // CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST && !CONFIG_ZMK_SPLIT_ROLE_CENTRAL
 
@@ -968,6 +1023,22 @@ static int watchdog_split_relay_central_test_init(void) {
     return 0;
 }
 
-SYS_INIT(watchdog_split_relay_central_test_init, APPLICATION, CONFIG_APPLICATION_INIT_PRIORITY);
+static struct k_work_delayable watchdog_split_relay_central_test_delayed_work;
+
+static void watchdog_split_relay_central_test_delayed_work_handler(struct k_work *work) {
+    watchdog_split_relay_central_test_init();
+}
+
+static int watchdog_split_relay_central_test_delayed_init(void) {
+    /* See watchdog_split_relay_test_delayed_init() above / DESIGN.md SS12.1. */
+    k_work_init_delayable(&watchdog_split_relay_central_test_delayed_work,
+                           watchdog_split_relay_central_test_delayed_work_handler);
+    k_work_schedule(&watchdog_split_relay_central_test_delayed_work,
+                     K_MSEC(CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST_DELAY_MS));
+    return 0;
+}
+
+SYS_INIT(watchdog_split_relay_central_test_delayed_init, APPLICATION,
+         CONFIG_APPLICATION_INIT_PRIORITY);
 
 #endif // CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST && CONFIG_ZMK_SPLIT_ROLE_CENTRAL
