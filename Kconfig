@@ -43,22 +43,37 @@ config ZMK_WATCHDOG_PROTOBUF
     imply NANOPB_NO_ENCODE_SIZE_CHECK
 
 config ZMK_WATCHDOG_SPLIT_RELAY
-    bool "Relay watchdog Studio RPC to split peripherals"
-    default y if ZMK_SPLIT
+    bool "Relay watchdog Studio RPC to split peripherals (EXPERIMENTAL, opt-in)"
+    default n
     depends on ZMK_SPLIT_RELAY_EVENT
     select ZMK_WATCHDOG_PROTOBUF
     help
-      Enable on BOTH halves of a split keyboard to reach a peripheral's own
-      incident log through the central's cormoran__watchdog Studio RPC
-      subsystem: any GetStatus/ListIncidents/DeleteIncidents request with a
-      nonzero `source` is relayed to the matching peripheral over
-      CONFIG_ZMK_SPLIT_RELAY_EVENT, and the response arrives back as a
-      PeripheralResponse Studio notification (relaying is asynchronous,
-      unlike a local request). A ListIncidents answer streams one incident
-      per relay event rather than a whole page in one event, so
-      CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN never needs to be raised above
-      its framework default for this module (see src/split/watchdog_relay.c's
-      BUILD_ASSERTs and DESIGN.md SS7.1).
+      EXPERIMENTAL, default off: hardware testing (DESIGN.md SS12.1) could
+      not get a relayed request to complete end-to-end on real split
+      hardware -- the central always accepts the request and returns a
+      DeferredResponse, but no PeripheralResponse notification was ever
+      observed to arrive, across many repeated attempts under varied
+      conditions (immediately after pairing, after 60+ seconds of stable
+      connection, before/after reconnects). The root cause was not
+      isolated (ruled out: wrong relay source tagging, GATT-discovery
+      race, and the peripheral simply being mid-crash-reboot). Peripherals
+      still detect and store incidents in their own local flash correctly
+      either way -- only *reading that log from the central* is affected.
+      Enable this only to continue investigating; do not rely on it in a
+      shipped configuration until the round-trip has been verified working
+      on real hardware.
+
+      When it does work as designed: enable on BOTH halves of a split
+      keyboard to reach a peripheral's own incident log through the
+      central's cormoran__watchdog Studio RPC subsystem: any GetStatus/
+      ListIncidents/DeleteIncidents request with a nonzero `source` is
+      relayed to the matching peripheral over CONFIG_ZMK_SPLIT_RELAY_EVENT,
+      and the response arrives back as a PeripheralResponse Studio
+      notification (relaying is asynchronous, unlike a local request). A
+      ListIncidents answer streams one incident per relay event rather
+      than a whole page in one event, so CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN
+      never needs to be raised above its framework default for this module
+      (see src/split/watchdog_relay.c's BUILD_ASSERTs and DESIGN.md SS7.1).
       Note: the underlying split relay event transport broadcasts to every
       connected peripheral, not to one addressed peripheral -- with more
       than one peripheral, every peripheral answers every relayed request

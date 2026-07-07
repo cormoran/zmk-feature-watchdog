@@ -1,15 +1,20 @@
 # zmk-feature-watchdog — Design
 
-Status: **Phases A-E implemented and unit/build tested; Phase F (hardware
-validation) partially done.** Single-board hardware validation
-(freeze/fatal detection, retained-RAM crash-crossing, flash-wear cap,
-delete/resume, RPC pagination) is **complete and green** — see §12.1 for
-full results. Split-relay hardware validation (2 boards) was attempted but
-**not completed**: a second board on this rig hit a real, pre-existing
-hardware/boot-stability issue unrelated to this module's code (§12.1
-has details and a recommendation for whoever resumes it). This document
-remains the source of truth for what was built and why; see §13 for
-phase-by-phase detail and §12/§12.1 for the hardware validation checklist
+Status: **Phases A-E implemented and unit/build tested. Phase F (hardware
+validation) done for everything except the split relay round-trip.**
+Single-board hardware validation (freeze/fatal detection, retained-RAM
+crash-crossing, flash-wear cap, delete/resume, RPC pagination) is
+**complete and green**, and split BLE pairing is confirmed on real
+hardware — see §12.1 for full results, including a real central-boot-hang
+bug found and fixed along the way (a stack overflow in this module's own
+boot self-test, nothing to do with clocks/hardware despite early
+appearances). The split relay round-trip itself (reading a peripheral's
+log from the central) could not be verified working end-to-end despite
+extensive testing, so `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY` now **defaults to
+`n`** (experimental, opt-in) — local per-half incident logging does not
+depend on it and is fully verified. This document remains the source of
+truth for what was built and why; see §13 for phase-by-phase detail and
+§12/§12.1 for the hardware validation checklist
 and results.
 
 ## 1. Goal
@@ -645,6 +650,100 @@ this module.** After removing `CONFIG_ZMK_WATCHDOG_HW_FALLBACK` (commit
   to have fixed the Abyss Tester XIAO board; a physical power cycle
   (as before) is still the known, if unexplained, workaround.
 
+**Final conclusion (supersedes all of the above `lfclk_spinwait` theorizing):
+the "central hangs" bug was a plain main-thread stack overflow in this
+module's own test code, unrelated to clocks, crystals, or hardware
+condition.** A later session ran a clean hardware bisection (same
+physical board, same flash offset, toggling exactly one
+`CONFIG_ZMK_WATCHDOG_*` sub-feature at a time) and found the hang tracked
+`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY` exactly -- but the actual culprit was
+`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST`'s central-side boot self-test
+(depends on `SPLIT_RELAY`, so it silently rode along in every bisection
+step), whose `watchdog_split_relay_central_test_init()` (a `SYS_INIT` at
+`APPLICATION` priority, on the main thread, before `zmk_usb_init()`) kept
+two ~240-byte `cormoran_watchdog_Response` structs as stack locals,
+overflowing `CONFIG_MAIN_STACK_SIZE=1024`'s guard region before USB ever
+came up. Every earlier "stuck in `lfclk_spinwait()`" observation was a
+debugger sampling a device that had crashed at boot, rebooted (because
+`CONFIG_ZMK_WATCHDOG_FATAL_DETECT` was also on), and was burning most of
+each short boot cycle re-spinning up the LFCLK crystal -- not an actual
+clock hang. **Fixed** by making the two response structs `static` (commit
+`d514ea8`); verified with a controlled same-board/same-offset A/B test
+(`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=n` boots, `=y` with the old code
+hung, `=y` with the fix boots) and confirmed on the standard
+`module_watchdog_split_central` artifact (self-test included) with real
+Studio RPC access afterward. The earlier crystal/hardware-condition theory
+was a red herring produced by debugging a crash loop as if it were a
+clock driver bug.
+
+**Split relay round-trip: still not verified working, disabled by
+default.** With the boot hang fixed, split BLE pairing was confirmed on
+real hardware (peripheral RTT log shows `security_changed` at level 2 and
+both `split_svc_pos_state_ccc`/`split_svc_relay_event_ccc` CCC
+subscriptions at value 1 -- the central correctly subscribed to the relay
+event characteristic). However, an actual relayed request
+(`ListIncidents`/`GetStatus` with a nonzero `source`) never completed:
+the central always accepts it and returns a `DeferredResponse`, but no
+`PeripheralResponse` notification was ever observed to arrive, across
+many repeated attempts under varied conditions (immediately after fresh
+pairing, after 60+ seconds of a stable, crash-free connection confirmed
+via unchanged local incident counts, before and after reconnects).
+Hypotheses ruled out: wrong relay `source` tagging (`ZMK_RELAY_EVENT_SOURCE_SELF`
+is correctly set in `send_relay_request()`), a GATT-discovery race
+(`update_peripherals_relay_event_work_handler` in the ZMK fork's
+`central.c` does log-and-drop if `relay_event_subscribe_params.value_handle`
+isn't yet populated, but waiting 60+ s past pairing didn't help), and the
+peripheral simply being mid-crash-reboot (confirmed stable via unchanged
+local incident count spanning the failed attempt). Root cause not
+isolated -- diagnosing further required reading the central's RTT log,
+but JLink halts needed for that reliably re-triggered the (separate, real,
+Zephyr-upstream) `LL_ASSERT_OVERHEAD` BLE-controller assertion described
+below, contaminating the very connection being diagnosed, and building a
+non-invasive Studio-RPC-based diagnostic hit a dead end (ZMK's
+`CMakeLists.txt`/proto generation assumes Studio RPC only ever compiles on
+the central role; forcing it onto a peripheral-role build fails to
+compile). Given this, `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY` was changed to
+**default `n`** (§10/Kconfig, was `default y if ZMK_SPLIT`) so a shipped
+configuration doesn't silently depend on an unverified code path; the
+`watchdog-split-rpc-relay` snippet (used only by this repo's own build
+tests) still explicitly sets it to `y` so the code keeps getting built and
+covered by native_sim/build tests. See README's "Split keyboard
+limitations" for the user-facing version of this same caveat.
+
+**Real, separate finding along the way (Zephyr-upstream, not a bug in this
+module): `LL_ASSERT_OVERHEAD` in `lll_central.c`.** While investigating
+the above, the central *did* genuinely crash a few times independent of
+the (now-fixed) stack overflow, with a deterministic `K_ERR_KERNEL_OOPS`
+fault at `prepare_cb`, `subsys/bluetooth/controller/ll_sw/nordic/lll/lll_central.c:250`
+(`LL_ASSERT_OVERHEAD(overhead)`, firing when `lll_preempt_calc()` reports
+the radio-event prepare callback ran later than its timing budget). A
+code-analysis pass concluded this is a pre-existing Zephyr BLE controller
+fragility under multi-role load (`CONFIG_BT_CENTRAL` + `CONFIG_BT_PERIPHERAL`
++ `CONFIG_BT_OBSERVER` all active at once, as any ZMK split central is),
+architecturally incapable of being triggered by this module's own code
+(the LLL radio ISR runs at the highest IRQ priority; `task_wdt` feed work
+uses `k_sched_lock`, not `irq_lock`; relay dispatch is fully async/non-blocking).
+Zephyr documents a purpose-built escape hatch for exactly this
+(`CONFIG_BT_CTLR_ASSERT_OVERHEAD_START=n`, in
+`subsys/bluetooth/controller/Kconfig.ll_sw_split`, "permits the Controller
+to gracefully skip radio events... instead of asserting"), but repeated
+attempts to actually apply it in this build (`-D` cmake args, `EXTRA_CONF_FILE`,
+both `=n` and `# ... is not set` syntax, fresh build directories) all
+silently produced `CONFIG_BT_CTLR_ASSERT_OVERHEAD_START=y` anyway (a
+Kconfig warning confirmed the override was seen and rejected -- "was
+assigned the value 'n' but got the value 'y'" -- with no `select`/`imply`
+found anywhere in the tree explaining why). **This override attempt was
+abandoned per the project owner's direction** (not worth the further time
+given the crash is real but was also observed to disappear entirely
+during 100+ seconds of hands-off, JLink-untouched operation, i.e. it's
+rare and appears to be significantly aggravated by JLink debugger halts
+themselves pausing the CPU mid radio-event -- exactly the failure mode
+this assertion detects). No change was made to `CONFIG_BT_CTLR_ASSERT_OVERHEAD_START`
+in this repo; if this crash becomes a practical problem for a real user
+(as opposed to a hardware-debugging artifact), revisit that Kconfig
+override with fresh eyes on the "why doesn't my override apply" puzzle
+first.
+
 ## 13. Implementation phases (each = one subagent task)
 
 Phase A — **done** (commit "Initialize zmk-feature-watchdog from module
@@ -672,11 +771,13 @@ intentionally still points at the upstream template.
   relayed notifications), split build tests. Acceptance: relay unit tests +
   both role builds green.
 - **Phase F — hardware validation.** §12 checklist on the rig. **Status:
-  single-board portion done and green (§12.1); split-relay portion
-  attempted but blocked by a hardware issue on the second board (§12.1) —
-  resume with the recommendation there.** README already reflects the
-  user guide content from earlier phases; revisit once split hardware
-  validation actually completes.
+  single-board portion done and green; split BLE pairing confirmed; a
+  real central-boot-hang bug (stack overflow, unrelated to hardware) was
+  found and fixed along the way (§12.1). The split relay round-trip itself
+  was never verified working end-to-end despite extensive testing, so
+  `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY` now defaults to `n` (§12.1, README
+  "Split keyboard limitations").** Revisit that Kconfig default once the
+  round-trip is actually verified working on real hardware.
 
 Every phase: run `python3 -m unittest` inside the nix devshell
 (`nix --extra-experimental-features 'nix-command flakes' develop

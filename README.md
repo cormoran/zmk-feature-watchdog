@@ -17,11 +17,15 @@ This module includes:
 - **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
 - **Tests**: Firmware unit tests (`tests/studio/`, `tests/watchdog/`) and build tests (`tests/zmk-config/`)
 
-On a split keyboard, the central also proxies read/delete requests to a
-connected peripheral's own incident log over ZMK's split relay event
-mechanism (`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`, see DESIGN.md SS7 and
+On a split keyboard, each half detects and stores its own incidents
+locally (this part is hardware-verified). The central can additionally
+*try* to proxy read/delete requests to a connected peripheral's own
+incident log over ZMK's split relay event mechanism
+(`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`, see DESIGN.md SS7/SS12.1 and
 `src/split/watchdog_relay.c`) -- select "Peripheral N" as the source in the
-web UI's status card.
+web UI's status card. **This relay proxy is EXPERIMENTAL and disabled by
+default** (see "Split keyboard limitations" below) -- hardware testing
+could not get a relayed request to complete end-to-end.
 
 ## More Info
 
@@ -95,12 +99,15 @@ For more info on modules, you can read through through the [Zephyr modules page]
    remains the only freeze-detection mechanism this module provides.
 
    **Split keyboards**: enable `CONFIG_ZMK_WATCHDOG=y` on *both* halves so
-   each detects and stores its own incidents. `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`
-   defaults to `y` whenever `CONFIG_ZMK_SPLIT=y`, so no extra flag is usually
-   needed -- it pulls in nanopb on its own (via a hidden
-   `CONFIG_ZMK_WATCHDOG_PROTOBUF`) so a peripheral build compiles the relay
-   responder without needing `CONFIG_ZMK_STUDIO` at all. Only the central
-   needs `CONFIG_ZMK_STUDIO`/`CONFIG_ZMK_WATCHDOG_STUDIO_RPC`. See
+   each detects and stores its own incidents -- this part works reliably
+   and is hardware-verified independently on each half. Reading a
+   peripheral's log *from the central* additionally requires
+   `CONFIG_ZMK_WATCHDOG_SPLIT_RELAY=y` on both halves, but this defaults to
+   `n` and is **experimental**: repeated hardware testing (DESIGN.md SS12.1)
+   never got a relayed request to complete end-to-end (the central always
+   accepts the request, but no response ever arrived back), so don't rely
+   on it in a shipped configuration yet. Only the central needs
+   `CONFIG_ZMK_STUDIO`/`CONFIG_ZMK_WATCHDOG_STUDIO_RPC` regardless. See
    "Split keyboard limitations" below.
 
 3. Open the [web UI](https://cormoran.github.io/zmk-feature-watchdog/) (or
@@ -136,6 +143,18 @@ For more info on modules, you can read through through the [Zephyr modules page]
 
 ### Split keyboard limitations
 
+- **The relay proxy (`CONFIG_ZMK_WATCHDOG_SPLIT_RELAY`) is experimental and
+  off by default.** Local (Central-only) incident logging is fully
+  hardware-verified and does not depend on this option at all -- both
+  halves of a split keyboard detect and store their own incidents
+  correctly regardless. Only *viewing a peripheral's log from the
+  central's web UI* needs this flag, and hardware testing (DESIGN.md
+  SS12.1) could not get that round-trip to complete even once, across
+  many repeated attempts (fresh pairing, 60+ seconds of stable
+  connection, before/after reconnects) -- the central always accepts the
+  request and returns a `DeferredResponse`, but the `PeripheralResponse`
+  notification never arrived. If you enable it anyway, expect it to not
+  work; a request with a nonzero `source` will just leave the UI waiting.
 - **Broadcast, not addressed**: the underlying split relay event transport
   sends a central→peripheral request to *every* connected peripheral, not
   to one addressed peripheral. With more than one peripheral, every
