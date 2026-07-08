@@ -1,21 +1,71 @@
 include:
-  - artifact: module_template_board_feature_disabled
+  - artifact: module_watchdog_board_feature_disabled
     board: xiao_ble//zmk
     shield: tester_xiao
 
-  - artifact: module_template_board_with_rpc
+  - artifact: module_watchdog_board_with_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_TEMPLATE_FEATURE=y -DCONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
+    # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE is left at its framework default --
+    # the Studio RPC TX path is a genuine streaming ring buffer that never
+    # needs a whole IncidentPage response to fit in one buffer (DESIGN.md
+    # SS7.2).
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
     snippet: studio-rpc-usb-uart
 
-  - artifact: module_template_board_without_rpc
+  - artifact: module_watchdog_board_without_rpc
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_TEMPLATE_FEATURE=y
+    cmake-args: -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y
+
+  # Dedicated test-injection build (DESIGN.md SS4.4/SS12): proves
+  # CONFIG_ZMK_WATCHDOG_TEST_INJECTION (+ its RPC wiring in
+  # src/studio/watchdog_request_exec.c) compiles for a real board target, not
+  # just native_sim -- kept as its own artifact rather than enabling
+  # TEST_INJECTION on module_watchdog_board_with_rpc, since it is dangerous
+  # and must stay off in every "normal" build/artifact by default. Not
+  # combined with the boot-delay auto-trigger Kconfig options (those are
+  # meant to be set ad hoc for one hardware-validation flash, not baked into
+  # a standing build-test artifact).
+  - artifact: module_watchdog_board_test_injection
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE: see the module_watchdog_board_with_rpc
+    # comment above.
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_WATCHDOG_FREEZE_DETECT=y -DCONFIG_ZMK_WATCHDOG_FATAL_DETECT=y -DCONFIG_ZMK_WATCHDOG_TEST_INJECTION=y
+    snippet: studio-rpc-usb-uart
 
   - artifact: custom_settings_board
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_TEMPLATE_FEATURE=y -DCONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
+    # CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE: see the module_watchdog_board_with_rpc
+    # comment above.
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_WATCHDOG=y -DCONFIG_ZMK_WATCHDOG_STUDIO_RPC=y -DCONFIG_ZMK_CUSTOM_SETTINGS=y -DCONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
     snippet: studio-rpc-usb-uart
+
+  # Split keyboard build coverage (DESIGN.md SS7): peripheral role (relay +
+  # watchdog core, no Studio of its own) and central role (local RPC + relay
+  # proxy) built as separate firmware images, proving both roles compile --
+  # end-to-end relay behavior is covered by the native_sim
+  # tests/split_peripheral test (no real split hardware in this environment;
+  # see DESIGN.md SS12).
+  - artifact: module_watchdog_split_peripheral
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    snippet: watchdog-split-rpc-relay
+
+  # CONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=y is added here (rather than a
+  # dedicated native_sim test) because the central-role self-test needs
+  # zmk_split_central_send_relay_event(), only implemented by the real BLE
+  # split transport (CONFIG_ZMK_SPLIT_BLE) -- native_sim would need a
+  # working BT stack to link it, which is out of scope for this check. This
+  # build only proves the central dispatch test code compiles/links; its
+  # PASS/FAIL boot-log output is not observable without real hardware.
+  - artifact: module_watchdog_split_central
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_WATCHDOG_SPLIT_RELAY_TEST=y
+    snippets:
+      - studio-rpc-usb-uart
+      - watchdog-split-rpc-relay
+      - watchdog-split-central

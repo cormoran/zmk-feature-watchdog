@@ -1,0 +1,4 @@
+PASS: watchdog_split_relay_list_incidents
+PASS: watchdog_split_relay_incident_chunk_stream
+PASS: watchdog_split_relay_delete_incidents
+PASS: watchdog_split_relay_unsupported_kind

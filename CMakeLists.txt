@@ -1,10 +1,47 @@
 zephyr_include_directories(include)
-if(CONFIG_ZMK_TEMPLATE_FEATURE)
-    # target_sources(app PRIVATE ...)
+if(CONFIG_ZMK_WATCHDOG)
+    target_sources(app PRIVATE src/watchdog_store.c)
+    target_sources(app PRIVATE src/watchdog_pending.c)
+    target_sources(app PRIVATE src/watchdog_reset_cause.c)
 
-    if(CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC)
-        file(GLOB_RECURSE C_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.c)
-        target_sources(app PRIVATE ${C_FILES})
+    if(CONFIG_ZMK_WATCHDOG_FREEZE_DETECT)
+        target_sources(app PRIVATE src/watchdog_freeze.c)
+    endif()
+
+    if(CONFIG_ZMK_WATCHDOG_FATAL_DETECT)
+        target_sources(app PRIVATE src/watchdog_fatal.c)
+    endif()
+
+    if(CONFIG_ZMK_WATCHDOG_TEST_INJECTION)
+        target_sources(app PRIVATE src/watchdog_inject.c)
+        target_sources(app PRIVATE src/watchdog_inject_autotrigger.c)
+    endif()
+
+    if(CONFIG_ZMK_WATCHDOG_TEST)
+        target_sources(app PRIVATE src/test/watchdog_test.c)
+    endif()
+
+    # Protobuf/nanopb generation and src/studio/watchdog_request_exec.c (the
+    # transport-independent GetStatus/ListIncidents/DeleteIncidents executor
+    # against the local store) are needed by BOTH the local Studio RPC
+    # handler (CONFIG_ZMK_WATCHDOG_STUDIO_RPC, central/non-split only) and
+    # the split relay peripheral responder (CONFIG_ZMK_WATCHDOG_SPLIT_RELAY,
+    # which a split peripheral -- with no Studio of its own -- also needs),
+    # so this is gated on either being enabled, not just the RPC one.
+    if(CONFIG_ZMK_WATCHDOG_STUDIO_RPC OR CONFIG_ZMK_WATCHDOG_SPLIT_RELAY)
+        target_sources(app PRIVATE src/studio/watchdog_request_exec.c)
+
+        if(CONFIG_ZMK_WATCHDOG_STUDIO_RPC)
+            target_sources(app PRIVATE src/studio/watchdog_handler.c)
+
+            if(CONFIG_ZMK_WATCHDOG_STUDIO_RPC_TEST)
+                target_sources(app PRIVATE src/test/watchdog_rpc_test.c)
+            endif()
+        endif()
+
+        if(CONFIG_ZMK_WATCHDOG_SPLIT_RELAY)
+            target_sources(app PRIVATE src/split/watchdog_relay.c)
+        endif()
 
         list(APPEND CMAKE_MODULE_PATH ${ZEPHYR_BASE}/modules/nanopb)
         include(nanopb)

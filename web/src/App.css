@@ -38,3 +38,90 @@
   margin: 0;
   overflow-x: auto;
 }
+
+.error-message,
+.warning-message {
+  padding: 0.5rem 0.75rem;
+  border-radius: 4px;
+  margin: 0.5rem 0;
+}
+
+.error-message {
+  background: #fdecea;
+  color: #611a15;
+}
+
+.warning-message {
+  background: #fff4e5;
+  color: #663c00;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.5rem;
+  margin: 0.5rem 0;
+}
+
+.source-selector {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.btn-danger {
+  background: #d32f2f;
+  color: #fff;
+  border: none;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+.incidents-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.incidents-table th,
+.incidents-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #ddd;
+  white-space: nowrap;
+}
+
+.incidents-table .detail-cell {
+  white-space: normal;
+  min-width: 220px;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.8em;
+  font-weight: 600;
+  color: #fff;
+}
+
+.badge-freeze {
+  background: #f57c00;
+}
+
+.badge-fatal {
+  background: #d32f2f;
+}
+
+.badge-reset-cause {
+  background: #616161;
+}
+
+.delete-all-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}

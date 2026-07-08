@@ -1,0 +1,10 @@
+PASS: watchdog_store_append_read
+PASS: watchdog_store_delete
+PASS: watchdog_store_cap_reached_drops
+PASS: watchdog_store_delete_all_resumes_recording
+PASS: watchdog_store_persists_across_reload
+PASS: watchdog_pending_convert_valid
+PASS: watchdog_pending_convert_bad_crc_discarded
+PASS: watchdog_fatal_build_record
+PASS: watchdog_fatal_handler_end_to_end
+PASS: watchdog_freeze_detect

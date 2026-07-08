@@ -1,0 +1,2 @@
+/zmk: Welcome to ZMK!/p
+s/.*PASS: watchdog_/PASS: watchdog_/p

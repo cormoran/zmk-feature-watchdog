@@ -1,0 +1,24 @@
+# Nanopb options file for watchdog.proto
+# Every string/bytes field needs an explicit max_size (nanopb pitfall); every
+# repeated field needs an explicit max_count (page size / delete batch size).
+
+cormoran.watchdog.ErrorResponse.message           max_size:64
+
+cormoran.watchdog.FreezeDetail.queue_name         max_size:16
+cormoran.watchdog.FatalDetail.thread_name         max_size:16
+
+# Pagination: at most 4 incidents per ListIncidents response
+# (WATCHDOG_RPC_PAGE_SIZE in src/studio/watchdog_request_exec.c must match).
+# Chosen purely for UX -- the split relay path (src/split/watchdog_relay.c)
+# streams one incident per relay event (DESIGN.md SS7.1) instead of
+# embedding a whole page in one relay event, so this is no longer
+# constrained by the split relay transport's 255-byte hard ceiling or by
+# CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE (DESIGN.md SS7.2 -- that transport is a
+# genuine streaming ring buffer and never needs a whole response to fit in
+# one buffer either).
+cormoran.watchdog.IncidentPageResponse.incidents  max_count:4
+
+# Delete-by-id batch size: generous enough to delete a handful of incidents
+# in one call without needing repeated round-trips; still small relative to
+# CONFIG_ZMK_WATCHDOG_MAX_INCIDENTS default (16).
+cormoran.watchdog.DeleteIncidentsRequest.ids       max_count:16

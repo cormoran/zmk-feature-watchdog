@@ -1,0 +1,238 @@
+syntax = "proto3";
+
+package cormoran.watchdog;
+
+// Incident kind discriminator, mirrors enum zmk_watchdog_incident_type in
+// include/cormoran/zmk/watchdog.h.
+enum IncidentType {
+    FREEZE = 0;
+    FATAL = 1;
+    RESET_CAUSE = 2;
+}
+
+// Mirrors struct zmk_watchdog_incident_freeze_detail.
+message FreezeDetail {
+    uint32 channel_id = 1;
+    string queue_name = 2;
+}
+
+// Mirrors struct zmk_watchdog_incident_fatal_detail.
+message FatalDetail {
+    uint32 reason = 1;
+    uint32 pc = 2;
+    uint32 lr = 3;
+    string thread_name = 4;
+}
+
+// Mirrors struct zmk_watchdog_incident_reset_detail.
+message ResetDetail { uint32 cause_bits = 1; }
+
+// A single incident, sourced either locally (source == 0, this device) or
+// relayed from a split peripheral (source == peripheral slot + 1, see
+// DESIGN.md SS7).
+message Incident {
+    uint32 id = 1;
+    uint32 source = 2;
+    IncidentType type = 3;
+    uint32 boot_ordinal = 4;
+    uint32 uptime_s = 5;
+    oneof detail {
+        FreezeDetail freeze = 6;
+        FatalDetail fatal = 7;
+        ResetDetail reset = 8;
+    }
+}
+
+// Request current status (capacity/stored/dropped/recording_stopped).
+// `source` selects which half answers: 0 = local/central (answered
+// synchronously); N>0 = split peripheral slot N, relayed over
+// CONFIG_ZMK_SPLIT_RELAY_EVENT (see DESIGN.md SS7) -- the reply arrives as a
+// PeripheralResponse Notification instead of a synchronous Response.
+message GetStatusRequest { uint32 source = 1; }
+
+// Paginated incident listing. start_index is 0-based over the store's
+// dense enumeration order (see zmk_watchdog_store_get()). `source`: see
+// GetStatusRequest.source.
+message ListIncidentsRequest {
+    uint32 start_index = 1;
+    uint32 source = 2;
+}
+
+// Delete specific incidents by id, or every incident when all=true (ids is
+// ignored in that case). `source`: see GetStatusRequest.source.
+message DeleteIncidentsRequest {
+    repeated uint32 ids = 1;
+    bool all = 2;
+    uint32 source = 3;
+}
+
+// Which detector to exercise. Mirrors zmk_watchdog_inject_freeze()/
+// zmk_watchdog_inject_fatal() (include/cormoran/zmk/watchdog.h). Only
+// honored when the firmware was built with
+// CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y -- otherwise InjectTestRequest is
+// answered with an ErrorResponse, same as any other unsupported request (see
+// DESIGN.md SS4.4).
+enum InjectTestKind {
+    FREEZE_KIND = 0;
+    FATAL_KIND = 1;
+}
+
+// Deliberately triggers the freeze or fatal detector, for hardware
+// validation (DESIGN.md SS4.4/SS12). Dangerous: only wired up when
+// CONFIG_ZMK_WATCHDOG_TEST_INJECTION=y.
+//   - kind=FREEZE_KIND: zmk_watchdog_inject_freeze() submits a k_work to the
+//     system workqueue and returns immediately -- the actual freeze (and
+//     eventual reboot) happens asynchronously, well after this request's
+//     InjectAckResponse has already been sent.
+//   - kind=FATAL_KIND: zmk_watchdog_inject_fatal() calls k_oops() synchronously
+//     in the handler's own call stack. The device reboots before the
+//     firmware gets a chance to send any response at all -- the caller
+//     should not expect an InjectAckResponse (or any response) for this one;
+//     that is expected, not a bug.
+message InjectTestRequest { InjectTestKind kind = 1; }
+
+message Request {
+    oneof request_type {
+        GetStatusRequest get_status = 1;
+        ListIncidentsRequest list_incidents = 2;
+        DeleteIncidentsRequest delete_incidents = 3;
+        InjectTestRequest inject_test = 4;
+    }
+}
+
+message ErrorResponse { string message = 1; }
+
+// Mirrors the store's capacity/count/dropped/recording_stopped accessors
+// (include/cormoran/zmk/watchdog.h).
+message StatusResponse {
+    uint32 capacity = 1;
+    uint32 stored = 2;
+    uint32 dropped_since_boot = 3;
+    bool recording_stopped = 4;
+}
+
+// At most WATCHDOG_RPC_PAGE_SIZE incidents per page (see
+// src/studio/watchdog_request_exec.c and watchdog.options' max_count on
+// `incidents` below) -- purely a UX choice now that the split relay path
+// streams one incident per relay event (DESIGN.md SS7.1) instead of
+// embedding a whole page in one relay event.
+message IncidentPageResponse {
+    repeated Incident incidents = 1;
+    uint32 total = 2;
+    uint32 start_index = 3;
+}
+
+message DeleteResultResponse { uint32 deleted = 1; }
+
+// Acknowledges an InjectTestRequest was received and (for FREEZE_KIND) the
+// async injection work was submitted. See InjectTestRequest's doc comment
+// above for why FATAL_KIND requests typically never get this far as an
+// actual wire response.
+message InjectAckResponse { InjectTestKind kind = 1; }
+
+// Returned immediately in place of the real response when a request's
+// `source` targets a split peripheral (relaying over
+// CONFIG_ZMK_SPLIT_RELAY_EVENT is inherently asynchronous -- it cannot fit
+// the Studio RPC call/response model). The real Response for this
+// `request_id` arrives later as a PeripheralResponse Notification. See
+// DESIGN.md SS7.
+message DeferredResponse { uint32 request_id = 1; }
+
+message Response {
+    oneof response_type {
+        ErrorResponse error = 1;
+        StatusResponse status = 2;
+        IncidentPageResponse incident_page = 3;
+        DeleteResultResponse delete_result = 4;
+        DeferredResponse deferred = 5;
+        InjectAckResponse inject_ack = 6;
+    }
+}
+
+// Pushed unsolicited (raise_zmk_studio_custom_notification) when a new
+// incident is persisted, so the web UI can show it live without polling.
+// See DESIGN.md SS8.
+message IncidentRecordedNotification { Incident incident = 1; }
+
+// The real response to a request that returned a DeferredResponse, once the
+// targeted peripheral's answer has relayed back to the central. Matches
+// pmw3610's PeripheralResponse pattern (src/split/watchdog_relay.c).
+message PeripheralResponse {
+    // Matches the source given in the original request (1 = first
+    // peripheral, etc; never 0 -- local requests are answered synchronously
+    // and never produce a DeferredResponse/PeripheralResponse).
+    uint32 source = 1;
+    uint32 request_id = 2;
+    Response response = 3;
+}
+
+message Notification {
+    oneof notification_type {
+        IncidentRecordedNotification incident_recorded = 1;
+        PeripheralResponse peripheral_response = 2;
+    }
+}
+
+// Wire format for relaying a Request to a split peripheral and its Response
+// back, carried as the opaque payload of this module's own
+// zmk_watchdog_relay_request/zmk_watchdog_relay_response ZMK split relay
+// events (see src/split/watchdog_relay.c) -- NOT part of the Request/Response
+// oneofs above, and never sent directly over the Studio RPC transport.
+message RelayRequest {
+    uint32 request_id = 1;
+    Request request = 2;
+}
+
+// One incident of a ListIncidents answer, streamed as its own relay event
+// (DESIGN.md SS7.1) so a RelayResponse never has to embed a whole
+// multi-incident IncidentPageResponse (which would force
+// CONFIG_ZMK_SPLIT_RELAY_EVENT_DATA_LEN above its 128-byte default). The
+// peripheral responder raises one of these per incident in the local page,
+// followed by one final `done=true` chunk (no incident) carrying `total`/
+// `start_index` for the whole page. `incident` is unset (has_incident=false)
+// on that final chunk.
+message RelayIncidentChunk {
+    bool done = 1;
+    uint32 total = 2;
+    uint32 start_index = 3;
+    Incident incident = 4;
+}
+
+// The non-paginated Response variants a peripheral can produce for a
+// relayed GetStatus/DeleteIncidents/InjectTest request (or a decode/
+// unsupported-request error) -- i.e. every `Response.response_type` oneof
+// member except `incident_page` (ListIncidents streams via
+// RelayIncidentChunk instead, see below) and `deferred` (only ever
+// synthesized by the central itself, never received from a peripheral).
+// Deliberately a *separate, small* message rather than reusing `Response`
+// directly: nanopb's static `_size` bound for a oneof-typed field is the
+// worst case across every branch of the referenced message's own oneof, so
+// embedding the full `Response` type here (whose `incident_page` branch can
+// hold WATCHDOG_RPC_PAGE_SIZE incidents) would make a single RelayResponse's
+// static encoded-size bound exceed the split relay transport's 255-byte
+// hard ceiling even though an incident_page is never actually placed here
+// at runtime -- exactly the blowup this whole redesign (DESIGN.md SS7.1)
+// exists to avoid. Field numbers/semantics mirror Response's, so converting
+// between the two is a straight copy.
+message RelayNonListResponse {
+    oneof relay_non_list_response_type {
+        ErrorResponse error = 1;
+        StatusResponse status = 2;
+        DeleteResultResponse delete_result = 4;
+        InjectAckResponse inject_ack = 6;
+    }
+}
+
+// RelayResponse is a oneof: `response` is used for GetStatus/
+// DeleteIncidents/InjectTest/Error (already small, single-shot answers --
+// same semantics as Response, see RelayNonListResponse's doc comment for
+// why it is a distinct message), while `incident_chunk` is used only for a
+// ListIncidents answer, streamed one incident per relay event (see
+// RelayIncidentChunk).
+message RelayResponse {
+    uint32 request_id = 1;
+    oneof relay_response_type {
+        RelayNonListResponse response = 2;
+        RelayIncidentChunk incident_chunk = 3;
+    }
+}
