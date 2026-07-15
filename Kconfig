@@ -126,7 +126,7 @@ if ZMK_WATCHDOG_FREEZE_DETECT
 
 config ZMK_WATCHDOG_FREEZE_TIMEOUT_MS
     int "Freeze detection timeout (ms)"
-    default 5000
+    default 10000
     help
       task_wdt channel timeout for each monitored work queue. The feed period
       is this value divided by CONFIG_ZMK_WATCHDOG_FREEZE_FEED_DIVISOR. Keep
