@@ -30,6 +30,16 @@ config ZMK_WATCHDOG_STUDIO_RPC
     depends on ZMK_STUDIO
     select ZMK_WATCHDOG_PROTOBUF
 
+config ZMK_WATCHDOG_STUDIO_RPC_UNSECURED
+    bool "Allow the watchdog Studio RPC while the device is locked"
+    depends on ZMK_WATCHDOG_STUDIO_RPC
+    help
+      By default the watchdog custom Studio RPC is secured: it requires an
+      unlocked device (&studio_unlock). Enable this to expose it while the
+      device is locked, which is useful in un-reliable environments where a
+      broken keyboard may not be able to type the unlock combo. The incident
+      log is not highly sensitive, but exposing it unlocked is opt-in.
+
 # Hidden: pulls in nanopb (+ the same encoding options ZMK_STUDIO itself
 # implies) for whichever of ZMK_WATCHDOG_STUDIO_RPC/ZMK_WATCHDOG_SPLIT_RELAY
 # is enabled -- a split peripheral build enables the latter without
