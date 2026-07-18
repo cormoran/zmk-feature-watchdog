@@ -27,9 +27,15 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static struct zmk_rpc_custom_subsystem_meta watchdog_feature_meta = {
     ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("http://cormoran.github.io/zmk-feature-watchdog/"),
-    // Unsecured is suggested by default to avoid unlocking in un-reliable
-    // environments.
+    // Secured by default: the incident log requires an unlocked device.
+    // Set CONFIG_ZMK_WATCHDOG_STUDIO_RPC_UNSECURED=y to expose it while
+    // locked -- useful in un-reliable environments where a broken keyboard
+    // may not be able to type the &studio_unlock combo.
+#if IS_ENABLED(CONFIG_ZMK_WATCHDOG_STUDIO_RPC_UNSECURED)
     .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
+#else
+    .security = ZMK_STUDIO_RPC_HANDLER_SECURED,
+#endif
 };
 
 static bool watchdog_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
